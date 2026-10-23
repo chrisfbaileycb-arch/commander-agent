@@ -109,6 +109,12 @@ describe('diff_policy', () => {
     expect(run(spec, { artifacts: { 'p.diff': diff('src/a.ts', 'const a = 1;') } })[0]!.ok).toBe(true);
     expect(run(spec, { artifacts: { 'p.diff': diff('.github/workflows/ci.yml', 'run: x') } })[0]!.ok).toBe(false);
   });
+  it('does not accept a header with no patch behind it as proof of a patch', () => {
+    const spec = [{ type: 'diff_policy', artifact: 'p.diff' }];
+    const r = run(spec, { artifacts: { 'p.diff': 'diff --git a/src/x.ts b/src/x.ts' } })[0]!;
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/no changed lines/);
+  });
 });
 
 describe('hidden verifiers and fail-closed', () => {
@@ -134,5 +140,15 @@ describe('step definition rules', () => {
   });
   it('rejects artifact names that traverse', () => {
     expect(StepDefSchema.safeParse({ title: 't', directive: 'd', proof: [{ type: 'artifact_present', name: 'a/../b' }] }).success).toBe(false);
+  });
+  it('rejects an artifact target no evidence could ever satisfy, instead of opening an unreleasable step', () => {
+    for (const type of ['json_valid', 'json_schema', 'regex']) {
+      const spec = { type, target: 'artifact:a/../b', ...(type === 'json_schema' ? { schema: {} } : {}), ...(type === 'regex' ? { pattern: 'x' } : {}) };
+      expect(StepDefSchema.safeParse({ title: 't', directive: 'd', proof: [spec] }).success, type).toBe(false);
+    }
+    // Names the evidence schema accepts are still accepted as targets, including dots and subdirectories.
+    for (const target of ['stdout', 'stderr', 'artifact:out.json', 'artifact:reports/a.b.json', 'artifact:a..b']) {
+      expect(StepDefSchema.safeParse({ title: 't', directive: 'd', proof: [{ type: 'json_valid', target }] }).success, target).toBe(target !== 'artifact:a..b');
+    }
   });
 });

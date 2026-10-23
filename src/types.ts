@@ -15,7 +15,12 @@ const ArtifactName = z
   .regex(ARTIFACT_NAME)
   .refine((n) => !n.includes('..'), 'artifact names may not contain ".."');
 
-const Target = z.string().regex(/^(stdout|stderr|artifact:[A-Za-z0-9_][\w.\-/]{0,119})$/);
+const ARTIFACT_PREFIX = 'artifact:';
+// An artifact target must be a name evidence can actually carry, or the step could never be satisfied.
+const Target = z
+  .string()
+  .regex(/^(stdout|stderr|artifact:[A-Za-z0-9_][\w.\-/]{0,119})$/)
+  .refine((t) => !t.startsWith(ARTIFACT_PREFIX) || ArtifactName.safeParse(t.slice(ARTIFACT_PREFIX.length)).success, 'artifact names may not contain ".."');
 const Hidden = { hidden: z.boolean().optional() };
 /** Paths for independent verification are always relative to the witness workspace and may not climb out of it. */
 const WorkspacePath = z

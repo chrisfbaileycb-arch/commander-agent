@@ -87,6 +87,15 @@ describe('parseUnifiedDiff', () => {
     const files = parseUnifiedDiff(diff('a.ts', ['1']) + diff('b.ts', ['2']));
     expect(files.map((f) => f.path)).toEqual(['a.ts', 'b.ts']);
   });
+
+  it('records the hunks of each file and whether one was cut off', () => {
+    const [ok] = parseUnifiedDiff(diff('a.ts', ['1']));
+    expect(ok).toMatchObject({ hunks: 1, truncated: false });
+    const [header] = parseUnifiedDiff('diff --git a/a.ts b/a.ts');
+    expect(header).toMatchObject({ hunks: 0, truncated: false });
+    const [cut] = parseUnifiedDiff('diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,2 +1,4 @@\n ctx\n+one');
+    expect(cut).toMatchObject({ hunks: 1, truncated: true });
+  });
 });
 
 describe('auditDiff', () => {
@@ -113,5 +122,61 @@ describe('auditDiff', () => {
   });
   it('rejects text with no diff hunks', () => {
     expect(auditDiff('just some prose', policy).ok).toBe(false);
+  });
+
+  describe('a patch has to carry a complete change, not merely name a file', () => {
+    const headerOnly = (path: string) => `diff --git a/${path} b/${path}`;
+
+    it('rejects a bare "diff --git" header', () => {
+      const r = auditDiff(headerOnly('src/x.ts'), policy);
+      expect(r.ok).toBe(false);
+      expect(r.violations.join()).toMatch(/no changed lines for src\/x\.ts/);
+    });
+
+    it('rejects headers with no hunk, and binary or rename-only entries', () => {
+      expect(auditDiff('--- a/x.ts\n+++ b/x.ts\n', policy).ok).toBe(false);
+      expect(auditDiff('diff --git a/img.png b/img.png\nBinary files a/img.png and b/img.png differ\n', policy).ok).toBe(false);
+      expect(auditDiff('diff --git a/a.ts b/b.ts\nsimilarity index 100%\nrename from a.ts\nrename to b.ts\n', policy).ok).toBe(false);
+    });
+
+    it('rejects a hunk header with nothing under it', () => {
+      expect(auditDiff('diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1,2 +1,3 @@\n', policy).ok).toBe(false);
+    });
+
+    it('rejects a hunk that changes nothing', () => {
+      const r = auditDiff('diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1,2 +1,2 @@\n one\n two\n', policy);
+      expect(r.ok).toBe(false);
+      expect(r.violations.join()).toMatch(/no changed lines/);
+    });
+
+    it('rejects a hunk that stops short of the line counts in its own header', () => {
+      const short = 'diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1,1 +1,4 @@\n ctx\n+one\n+two\n';
+      const r = auditDiff(short, policy);
+      expect(r.ok).toBe(false);
+      expect(r.violations.join()).toMatch(/truncated hunk in x\.ts/);
+      // Cut off by the next file instead of by the end of the text.
+      expect(auditDiff(`${short}${diff('y.ts', ['ok'])}`, policy).violations.join()).toMatch(/truncated hunk in x\.ts/);
+    });
+
+    it('is not fooled by the newline that ends the patch standing in for a missing context line', () => {
+      const oneShort = 'diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1,2 +1,3 @@\n ctx\n+one\n+two\n';
+      expect(auditDiff(oneShort, policy).violations.join()).toMatch(/truncated hunk/);
+    });
+
+    it('names the empty entry when it hides among real ones', () => {
+      const r = auditDiff(diff('src/a.ts', ['const a = 1;']) + headerOnly('src/hidden.ts'), policy);
+      expect(r.ok).toBe(false);
+      expect(r.violations.join()).toMatch(/src\/hidden\.ts/);
+      expect(r.violations.join()).not.toMatch(/src\/a\.ts/);
+    });
+
+    it('still accepts complete patches, with or without the final newline, and several hunks', () => {
+      expect(auditDiff(diff('src/a.ts', ['x']).trimEnd(), policy).ok).toBe(true);
+      const two = 'diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1,1 +1,2 @@\n a\n+b\n@@ -10,1 +11,2 @@\n c\n+d\n';
+      const r = auditDiff(two, policy);
+      expect(r.ok).toBe(true);
+      expect(r.linesChanged).toBe(2);
+      expect(auditDiff('diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-a\n+b\n\\ No newline at end of file\n', policy).ok).toBe(true);
+    });
   });
 });

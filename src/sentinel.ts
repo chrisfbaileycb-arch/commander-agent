@@ -225,7 +225,39 @@ function egressHosts(name: string, args: string[]): { hosts: string[]; unknown: 
   return { hosts: [], unknown: true };
 }
 
-function stripWrappers(tokens: string[]): string[] {
+/**
+ * Options that take their operand as the NEXT token, per wrapper. The operand must never be mistaken for the command
+ * the wrapper runs: in `sudo -p prompt rm -rf /` the command is `rm`, not `prompt`. Short options may be clustered
+ * (`sudo -Eu root`) or have the operand attached (`-uroot`), as getopt allows.
+ */
+const OPERAND_SHORT: Record<string, string> = {
+  sudo: 'CDghpRrTtUu',
+  doas: 'Cu',
+  env: 'aCSu',
+  timeout: 'sk',
+  nice: 'n',
+  ionice: 'cnpPu',
+  stdbuf: 'eio',
+  exec: 'a',
+  time: 'fo',
+  xargs: 'adEILnPs',
+};
+const OPERAND_LONG: Record<string, ReadonlySet<string>> = {
+  sudo: new Set(['--user', '--group', '--prompt', '--host', '--role', '--type', '--chdir', '--chroot', '--close-from', '--command-timeout', '--other-user']),
+  env: new Set(['--argv0', '--chdir', '--split-string', '--unset']),
+  timeout: new Set(['--kill-after', '--signal']),
+  nice: new Set(['--adjustment']),
+  ionice: new Set(['--class', '--classdata', '--pgid', '--pid', '--uid']),
+  stdbuf: new Set(['--error', '--input', '--output']),
+  xargs: new Set(['--arg-file', '--delimiter', '--eof', '--max-args', '--max-chars', '--max-lines', '--max-procs', '--replace']),
+};
+
+/**
+ * Peels wrappers and leading assignments off a command to find what actually runs. `nested` holds command lines the
+ * wrapper itself will execute (`env -S 'rm -rf /'`), which the caller must scan as commands in their own right.
+ */
+function stripWrappers(tokens: string[]): { rest: string[]; nested: string[] } {
+  const nested: string[] = [];
   let i = 0;
   while (i < tokens.length) {
     const t = tokens[i]!;
@@ -233,18 +265,45 @@ function stripWrappers(tokens: string[]): string[] {
       i++;
       continue;
     }
-    if (WRAPPERS.has(base(t))) {
-      const wrapper = base(t);
-      i++;
-      while (i < tokens.length && (tokens[i]!.startsWith('-') || /^\d+[smhd]?$/.test(tokens[i]!))) {
-        if (wrapper === 'sudo' && ['-u', '-g', '-C', '-D'].includes(tokens[i]!)) i++;
+    const wrapper = base(t);
+    if (!WRAPPERS.has(wrapper)) break;
+    i++;
+    let sawDuration = false;
+    while (i < tokens.length) {
+      const o = tokens[i]!;
+      if (o === '--') {
         i++;
+        break;
       }
-      continue;
+      if (wrapper === 'timeout' && !sawDuration && /^\d+(?:\.\d+)?[smhd]?$/.test(o)) {
+        sawDuration = true;
+        i++;
+        continue;
+      }
+      if (!o.startsWith('-') || o === '-') break;
+      i++;
+      let operand: string | undefined;
+      let commandLine = false; // env -S: the operand is itself a command line
+      if (o.startsWith('--')) {
+        const eq = o.indexOf('=');
+        const name = eq >= 0 ? o.slice(0, eq) : o;
+        if (eq >= 0) operand = o.slice(eq + 1);
+        else if (OPERAND_LONG[wrapper]?.has(name)) operand = tokens[i++];
+        commandLine = wrapper === 'env' && name === '--split-string';
+      } else {
+        const takes = OPERAND_SHORT[wrapper] ?? '';
+        for (let k = 1; k < o.length; k++) {
+          const c = o[k]!;
+          if (!takes.includes(c)) continue;
+          operand = k === o.length - 1 ? tokens[i++] : o.slice(k + 1);
+          commandLine = wrapper === 'env' && c === 'S';
+          break;
+        }
+      }
+      if (commandLine && operand) nested.push(operand);
     }
-    break;
   }
-  return tokens.slice(i);
+  return { rest: tokens.slice(i), nested };
 }
 
 function scanShell(line: string, policy: Policy, depth = 0): Finding[] {
@@ -261,7 +320,8 @@ function scanShell(line: string, policy: Policy, depth = 0): Finding[] {
   let usesEgress = false;
 
   cmds.forEach((cmd, idx) => {
-    const t = stripWrappers(cmd.tokens);
+    const { rest: t, nested } = stripWrappers(cmd.tokens);
+    for (const n of nested) findings.push(...scanShell(n, policy, depth + 1));
     if (t.length === 0) return;
     const name = base(t[0]!);
     const args = t.slice(1);
@@ -293,7 +353,7 @@ function scanShell(line: string, policy: Policy, depth = 0): Finding[] {
     if ((name === 'kill' && args.includes('-1')) || name === 'killall5') findings.push(deny('shell.mass-kill', 'Signal to every process.'));
 
     if (cmd.sep === '|') {
-      const next = cmds[idx + 1] && base(stripWrappers(cmds[idx + 1]!.tokens)[0] ?? '');
+      const next = cmds[idx + 1] && base(stripWrappers(cmds[idx + 1]!.tokens).rest[0] ?? '');
       if (next && INTERPRETERS.has(next) && FETCHERS.has(name)) {
         findings.push(deny('shell.remote-exec', 'Fetched content piped into an interpreter.'));
       }
@@ -339,12 +399,40 @@ function stripSqlNoise(sql: string): string {
     .replace(/'(?:[^']|'')*'/g, "''");
 }
 
+// Every verb a rule below keys on, plus the ones that legitimately follow a CTE list. A WITH prefix cannot hide any of them.
+const SQL_VERB = /^(?:SELECT|INSERT|UPDATE|DELETE|MERGE|REPLACE|VALUES|TABLE|DROP|TRUNCATE|ALTER|CREATE|RENAME|GRANT|REVOKE|COMMENT)\b/;
+
+/**
+ * Every statement a normalized SQL statement will actually run. Every destructive rule below is anchored to the start
+ * of a statement, so a leading WITH would hide what follows it: `WITH x AS (SELECT 1) DELETE FROM users`. A WITH
+ * statement is therefore judged by the statement after its CTE list AND by each CTE body, since PostgreSQL allows a
+ * data-modifying statement inside WITH (`WITH d AS (DELETE FROM users RETURNING *) SELECT * FROM d`).
+ */
+function sqlStatements(s: string): string[] {
+  if (!/^WITH\b/.test(s)) return [s];
+  const bodies: string[] = [];
+  const open: number[] = [];
+  let main: string | undefined;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    if (c === '(') open.push(i);
+    else if (c === ')') {
+      const start = open.pop();
+      if (start !== undefined) bodies.push(s.slice(start + 1, i).trim());
+    } else if (open.length === 0 && main === undefined && /[A-Z]/.test(c) && (i === 0 || !/\w/.test(s[i - 1]!)) && SQL_VERB.test(s.slice(i))) {
+      main = s.slice(i);
+    }
+  }
+  return [main ?? s, ...bodies.flatMap(sqlStatements)];
+}
+
 function scanSql(sql: string): Finding[] {
   const findings: Finding[] = [];
   const statements = stripSqlNoise(sql)
     .split(';')
     .map((s) => s.trim().replace(/\s+/g, ' ').toUpperCase())
-    .filter(Boolean);
+    .filter(Boolean)
+    .flatMap(sqlStatements);
   for (const s of statements) {
     const tautology = /\bWHERE\s+(?:1\s*=\s*1|TRUE)\b/.test(s);
     if (/^DROP (?:TABLE|DATABASE|SCHEMA)\b/.test(s)) findings.push(deny('sql.drop', 'DROP of a table, schema, or database.'));
@@ -384,7 +472,8 @@ function scanFs(payload: string, intent: ActionRequest['intent'], policy: Policy
   if (matchesAnyGlob(path, policy.forbidden_paths) || SECRET_PATH.test(path)) {
     findings.push(deny('fs.forbidden-path', 'Path is protected by policy.'));
   }
-  const mutating = intent !== undefined && intent !== 'read';
+  // Only an explicit "read" relaxes the mutation checks. Leaving the optional intent out must never loosen a guard.
+  const mutating = intent !== 'read';
   if (mutating && /^\/(?:etc|boot|sys|proc|dev|usr|bin|sbin|lib\d*)(?:\/|$)/.test(path)) {
     findings.push(deny('fs.system-path', 'Mutation of a system path.'));
   }

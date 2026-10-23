@@ -209,7 +209,7 @@ access can edit them. Pin what matters with `witness_file` and a `sha256`, or ad
 |---|---|
 | `commander_get_directive` | The one step you may run, a lease, the proof required, and a ledger of closed steps. |
 | `commander_submit_proof` | Evidence for that step. Returns `PASSED`, `REJECTED` (with a corrective patch), or `QUARANTINED`. |
-| `commander_request_clearance` | Ask before a risky action. Returns `CLEARED`, `DENIED` (with a redirect patch), or `STAGED`. |
+| `commander_request_clearance` | Ask before a risky action. Returns `CLEARED`, `DENIED` (with a redirect patch), or `STAGED`. For filesystem actions, declare `intent: "read"` when it is one: an omitted intent is judged as a mutation. |
 | `commander_clearance_status` | Poll a staged clearance. |
 | `commander_mission_status` | Active / paused / quarantined / completed / killed. Reveals nothing about the plan. |
 
@@ -248,6 +248,10 @@ mode, forbidden paths, patch size, loop thresholds, lease TTL, burn limit and cr
 Verifiers on worker evidence: `exit_code`, `json_valid`, `json_schema`, `regex`, `artifact_present`, `artifact_hash`,
 `nonce_present`, `diff_policy`. Independent verifiers (Commander observes): `witness_command`, `witness_file`.
 
+`diff_policy` audits a text unified diff and needs at least one complete hunk with a changed line for every file it
+names: a bare `diff --git` header, a cut-off hunk, and binary or rename-only entries fail. `artifact:` targets must be
+valid artifact names (no `..`), or the mission is rejected at open.
+
 ## What this does and does not guarantee
 
 Read this before relying on it.
@@ -268,6 +272,9 @@ Read this before relying on it.
 3. **The Sentinel is a tripwire, not a sandbox.** It parses declared actions (quoting, wrappers, `bash -c`, command
    substitution, pipelines) and denies known-bad patterns. A clean verdict means "no known-bad pattern", not "safe".
    Use `strict_shell` (allowlist, stage everything else) for unvetted workers, and run workers in a real sandbox.
+   Wrapper options are parsed for `sudo`, `doas`, `env`, `timeout`, `nice`, `ionice`, `stdbuf`, `exec`, `time` and
+   `xargs`, so `sudo -p prompt rm -rf /` is judged as `rm`; an option or wrapper outside those tables is not understood.
+   SQL that opens with a `WITH` clause is judged by the statement after it and by every CTE body.
 4. **The reasoning gate can only tighten.** It is never consulted for what the rules already denied or staged, and its
    verdict is combined with `max(severity)`. It reads worker-controlled text, so it is treated as a second opinion,
    not a boundary. If it is unreachable or malformed, the action is staged for a human.

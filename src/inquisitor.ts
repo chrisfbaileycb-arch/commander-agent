@@ -60,7 +60,13 @@ export interface DiffFile {
   path: string;
   added: string[];
   removed: number;
+  /** Hunks seen for this file. A header with none carries no content to audit. */
+  hunks: number;
+  /** A hunk ended before the line counts in its own header were met (a cut-off patch). */
+  truncated: boolean;
 }
+
+const newFile = (path: string): DiffFile => ({ path, added: [], removed: 0, hunks: 0, truncated: false });
 
 /** Hunk-aware unified diff parser: header-looking content lines inside a hunk are never mistaken for headers. */
 export function parseUnifiedDiff(text: string): DiffFile[] {
@@ -69,7 +75,10 @@ export function parseUnifiedDiff(text: string): DiffFile[] {
   let oldLeft = 0;
   let newLeft = 0;
 
-  for (const line of text.split('\n')) {
+  const lines = text.split('\n');
+  if (lines.at(-1) === '') lines.pop(); // the newline that ends the patch is not a context line
+
+  for (const line of lines) {
     if (oldLeft > 0 || newLeft > 0) {
       const tag = line[0];
       if (tag === '+') {
@@ -88,20 +97,21 @@ export function parseUnifiedDiff(text: string): DiffFile[] {
         continue;
       }
       if (tag === '\\') continue;
+      if (cur) cur.truncated = true; // something other than hunk content arrived while lines were still owed
       oldLeft = 0;
       newLeft = 0;
     }
     const git = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
     if (git) {
-      cur = { path: git[2]!, added: [], removed: 0 };
+      cur = newFile(git[2]!);
       files.push(cur);
       continue;
     }
     if (line.startsWith('+++ ')) {
       const p = line.slice(4).trim().replace(/^b\//, '');
       if (p !== '/dev/null') {
-        if (!cur || cur.added.length > 0 || cur.removed > 0) {
-          cur = { path: p, added: [], removed: 0 };
+        if (!cur || cur.hunks > 0) {
+          cur = newFile(p);
           files.push(cur);
         } else cur.path = p;
       }
@@ -110,13 +120,15 @@ export function parseUnifiedDiff(text: string): DiffFile[] {
     const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(line);
     if (hunk) {
       if (!cur) {
-        cur = { path: '(unknown)', added: [], removed: 0 };
+        cur = newFile('(unknown)');
         files.push(cur);
       }
+      cur.hunks++;
       oldLeft = hunk[1] === undefined ? 1 : Number(hunk[1]);
       newLeft = hunk[2] === undefined ? 1 : Number(hunk[2]);
     }
   }
+  if ((oldLeft > 0 || newLeft > 0) && cur) cur.truncated = true; // the patch ended mid-hunk
   return files;
 }
 
@@ -135,6 +147,9 @@ export function auditDiff(text: string, policy: Pick<Policy, 'forbidden_paths' |
   let linesChanged = 0;
   for (const f of files) {
     linesChanged += f.added.length + f.removed;
+    // A patch that names a file but carries no complete change to it proves nothing about that file.
+    if (f.hunks === 0 || f.added.length + f.removed === 0) violations.push(`no changed lines for ${f.path}`);
+    else if (f.truncated) violations.push(`truncated hunk in ${f.path}`);
     const segments = f.path.split('/');
     if (f.path.startsWith('/') || segments.includes('..')) violations.push(`path escapes the workspace: ${f.path}`);
     const forbidden = matchesAnyGlob(f.path, policy.forbidden_paths);
