@@ -1,0 +1,111 @@
+:root {
+  color-scheme: dark;
+  --bg: #0a0c0f;
+  --panel: #11151a;
+  --line: #232a32;
+  --fg: #e6e9ed;
+  --mut: #8f98a3;
+  --ok: #3fb57a;
+  --warn: #e0a030;
+  --bad: #e5534b;
+  --info: #5b9bd5;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+h1 { margin: 0; font-size: 15px; letter-spacing: 0.18em; font-weight: 700; }
+h1 .sub { color: var(--mut); font-weight: 500; }
+
+#connect { display: flex; gap: 8px; margin-left: auto; }
+
+input, button {
+  font: inherit;
+  color: var(--fg);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 8px;
+  min-height: 40px;
+  padding: 0 12px;
+}
+input { min-width: 0; width: 240px; font-family: var(--mono); font-size: 13px; }
+button { cursor: pointer; font-weight: 600; }
+button:hover { border-color: var(--mut); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+.link { font: 600 12px var(--mono); letter-spacing: 0.1em; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); }
+.link.live { color: var(--ok); border-color: var(--ok); }
+.link.offline { color: var(--mut); }
+.link.fault { color: var(--bad); border-color: var(--bad); }
+
+main { padding: 16px; max-width: 1200px; margin: 0 auto; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.tile.alert { border-color: var(--warn); }
+.tile h2 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--mut); font-weight: 600; }
+.big { margin: 6px 0 2px; font-size: 38px; line-height: 1.1; font-weight: 700; font-variant-numeric: tabular-nums; }
+.tile.alert .big { color: var(--warn); }
+.sm { margin: 0; color: var(--mut); font-size: 13px; }
+
+h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--mut); margin: 24px 0 10px; }
+
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; }
+.card.pending { border-color: var(--warn); }
+.card .head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 8px; }
+.card .title { font-weight: 600; }
+.card pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; font: 13px/1.45 var(--mono); }
+.label { color: var(--mut); font-size: 11px; text-transform: uppercase; letter-spacing: 0.09em; margin-top: 10px; }
+
+.badge { font: 700 11px var(--mono); letter-spacing: 0.08em; padding: 2px 8px; border-radius: 6px; border: 1px solid currentColor; }
+.s-active, .s-passed, .s-completed { color: var(--ok); }
+.s-released { color: var(--info); }
+.s-paused, .s-pending, .s-staged { color: var(--warn); }
+.s-quarantined, .s-killed { color: var(--bad); }
+.s-locked, .s-skipped { color: var(--mut); }
+
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.actions button { min-width: 110px; min-height: 44px; }
+.btn-ok { border-color: var(--ok); color: var(--ok); }
+.btn-warn { border-color: var(--warn); color: var(--warn); }
+.btn-bad { border-color: var(--bad); color: var(--bad); }
+.note { display: none; gap: 8px; margin-top: 10px; }
+.note.open { display: flex; flex-wrap: wrap; }
+.note input { flex: 1 1 240px; width: auto; font-family: inherit; font-size: 15px; }
+
+.ladder { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chip { font: 12px var(--mono); padding: 3px 8px; border-radius: 6px; border: 1px solid currentColor; }
+
+.audit { list-style: none; margin: 0; padding: 0; font: 12px/1.6 var(--mono); color: var(--mut); }
+.audit li { padding: 3px 0; border-bottom: 1px solid var(--line); word-break: break-word; }
+.audit .t { color: var(--fg); }
+
+.empty { color: var(--mut); padding: 8px 0; }
+
+@media (max-width: 560px) {
+  #connect { margin-left: 0; width: 100%; }
+  #connect input { flex: 1; width: auto; }
+  .big { font-size: 32px; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tile, .card { transition: border-color 0.2s; }
+}

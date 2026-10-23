@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Commander</title>
+  <link rel="stylesheet" href="/hud/style.css">
+</head>
+<body>
+  <header>
+    <h1>AGENT COMMANDER <span class="sub">// OPERATIONS</span></h1>
+    <form id="connect" autocomplete="off">
+      <label class="sr" for="key">Operator key</label>
+      <input id="key" type="password" placeholder="cmd_op_…" spellcheck="false">
+      <button type="submit">Connect</button>
+    </form>
+    <div id="link" class="link offline" role="status">OFFLINE</div>
+  </header>
+
+  <main>
+    <section class="tiles" aria-label="Telemetry">
+      <article class="tile">
+        <h2>Active agents</h2>
+        <p class="big" id="t-agents">–</p>
+        <p class="sm" id="t-missions"></p>
+      </article>
+      <article class="tile">
+        <h2>Spend burn</h2>
+        <p class="big" id="t-burn">–</p>
+        <p class="sm" id="t-spend"></p>
+      </article>
+      <article class="tile">
+        <h2>Error velocity</h2>
+        <p class="big" id="t-err">–</p>
+        <p class="sm" id="t-err-sub"></p>
+      </article>
+      <article class="tile" id="tile-appr">
+        <h2>Staged approvals</h2>
+        <p class="big" id="t-appr">–</p>
+        <p class="sm">awaiting operator</p>
+      </article>
+    </section>
+
+    <section aria-labelledby="h-appr">
+      <h2 class="section" id="h-appr">Staged approvals</h2>
+      <div id="approvals" aria-live="polite"></div>
+    </section>
+
+    <section aria-labelledby="h-msn">
+      <h2 class="section" id="h-msn">Missions</h2>
+      <div id="missions"></div>
+    </section>
+
+    <section aria-labelledby="h-aud">
+      <h2 class="section" id="h-aud">Audit tail</h2>
+      <ol id="audit" class="audit"></ol>
+    </section>
+  </main>
+
+  <script src="/hud/app.js"></script>
+</body>
+</html>

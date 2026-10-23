@@ -1,0 +1,14 @@
+{
+  "egress_allowlist": ["registry.example.com", "*.corp.example.com"],
+  "payment_hosts": ["*.stripe.com", "*.paypal.com", "*.plaid.com"],
+  "strict_shell": false,
+  "shell_allowlist": ["ls", "cat", "npm", "node", "git", "make", "pytest"],
+  "forbidden_paths": [".env", "**/.env", "**/.env.*", ".git/**", ".github/workflows/**", "**/id_rsa*", "**/*.pem"],
+  "max_patch_lines": 800,
+  "repetition_threshold": 5,
+  "repetition_window_sec": 600,
+  "lease_ttl_sec": 1800,
+  "burn_limit_per_min": 60,
+  "credit_costs": { "directive": 1, "proof": 2, "clearance": 1, "gate": 5 },
+  "approval_link_ttl_sec": 1800
+}
