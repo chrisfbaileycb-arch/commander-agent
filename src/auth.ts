@@ -5,7 +5,7 @@ import type { Store } from './store.js';
 import type { KeyRec, Principal, Role, TenantRec } from './types.js';
 import { iso, newId, newSecret, sha256, type Clock } from './util.js';
 
-export type MeterOp = 'directive' | 'proof' | 'clearance' | 'gate';
+export type MeterOp = 'directive' | 'proof' | 'clearance' | 'gate' | 'witness';
 
 const PREFIX: Record<Role, string> = { worker: 'cmd_live_', operator: 'cmd_op_' };
 

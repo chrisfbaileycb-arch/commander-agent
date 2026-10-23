@@ -11,7 +11,7 @@ const clear = (h: Harness, missionId: string, leaseId: string, action: unknown) 
   h.app.airlock.requestClearance(h.worker, missionId, { lease_id: leaseId, action });
 
 describe('macro-context isolation', () => {
-  it('shows a worker only the current step', () => {
+  it('shows a worker only the current step', async () => {
     const h = makeHarness();
     const m = open(h);
     const d = pull(h, m.id);
@@ -23,39 +23,39 @@ describe('macro-context isolation', () => {
     expect(wire).not.toContain('Seal');
   });
 
-  it('worker mission status reveals nothing about the plan', () => {
+  it('worker mission status reveals nothing about the plan', async () => {
     const h = makeHarness();
     const m = open(h);
     const s = h.app.airlock.missionStatus(h.worker, m.id);
     expect(Object.keys(s).sort()).toEqual(['message', 'mission_id', 'status']);
   });
 
-  it('refuses proof for a step that was never released', () => {
+  it('refuses proof for a step that was never released', async () => {
     const h = makeHarness();
     const m = open(h);
-    expect(codeOf(() => proof(h, m.id, 'lse_made_up', { exit_code: 0 }))).toBe('CONFLICT');
+    expect(await codeOfAsync(() => proof(h, m.id, 'lse_made_up', { exit_code: 0 }))).toBe('CONFLICT');
   });
 
-  it('step N+1 cannot be reached by guessing: a lease is bound to one step', () => {
+  it('step N+1 cannot be reached by guessing: a lease is bound to one step', async () => {
     const h = makeHarness();
     const m = open(h);
     const d1 = pull(h, m.id);
-    proof(h, m.id, d1.lease_id, goodBuild(d1.nonce));
+    await proof(h, m.id, d1.lease_id, goodBuild(d1.nonce));
     // The step-1 lease is revoked on pass; replaying it against step 2 must fail.
     pull(h, m.id);
-    expect(codeOf(() => proof(h, m.id, d1.lease_id, { stdout: '{"total":1}' }))).toBe('LEASE_INVALID');
+    expect(await codeOfAsync(() => proof(h, m.id, d1.lease_id, { stdout: '{"total":1}' }))).toBe('LEASE_INVALID');
   });
 });
 
 describe('mechanical proof over self-report', () => {
-  it('walks a lying worker through rejection, replay detection, and a real pass', () => {
+  it('walks a lying worker through rejection, replay detection, and a real pass', async () => {
     const h = makeHarness();
     const m = open(h);
     const d = pull(h, m.id);
     expect(d.nonce).toBeTruthy();
 
     const lie = { exit_code: 1, stdout: 'BUILD FAILED', claim: 'All good, task complete!' };
-    const r1 = proof(h, m.id, d.lease_id, lie);
+    const r1 = await proof(h, m.id, d.lease_id, lie);
     expect(r1.verdict).toBe('REJECTED');
     expect(r1.checks.map((c) => c.type)).toEqual(['exit_code', 'regex', 'nonce_present']);
     expect(r1.checks.every((c) => !c.ok)).toBe(true);
@@ -64,13 +64,13 @@ describe('mechanical proof over self-report', () => {
     expect(r1.nonce).toBeTruthy();
     expect(r1.nonce).not.toBe(d.nonce);
 
-    const r2 = proof(h, m.id, d.lease_id, lie);
+    const r2 = await proof(h, m.id, d.lease_id, lie);
     expect(r2.verdict).toBe('REJECTED');
     expect(r2.checks.map((c) => c.type)).toEqual(['replay']);
     expect(r2.patch).toContain('Identical evidence');
     expect(r2.attempts_remaining).toBe(1);
 
-    const r3 = proof(h, m.id, d.lease_id, goodBuild(r2.nonce));
+    const r3 = await proof(h, m.id, d.lease_id, goodBuild(r2.nonce));
     expect(r3.verdict).toBe('PASSED');
     expect(r3.mission_complete).toBe(false);
     expect(r3.manifest).toContain('14 passed');
@@ -81,30 +81,30 @@ describe('mechanical proof over self-report', () => {
     expect(d2.ledger).toEqual([r3.manifest]);
   });
 
-  it('a stale nonce from an earlier attempt does not pass', () => {
+  it('a stale nonce from an earlier attempt does not pass', async () => {
     const h = makeHarness();
     const m = open(h);
     const d = pull(h, m.id);
-    proof(h, m.id, d.lease_id, { exit_code: 1, stdout: 'x' });
-    expect(proof(h, m.id, d.lease_id, goodBuild(d.nonce)).verdict).toBe('REJECTED');
+    await proof(h, m.id, d.lease_id, { exit_code: 1, stdout: 'x' });
+    expect((await proof(h, m.id, d.lease_id, goodBuild(d.nonce))).verdict).toBe('REJECTED');
   });
 
-  it('records the untrusted claim for the operator but never lets it decide', () => {
+  it('records the untrusted claim for the operator but never lets it decide', async () => {
     const h = makeHarness();
     const m = open(h, oneStep());
     const d = pull(h, m.id);
-    const r = proof(h, m.id, d.lease_id, { exit_code: 3, claim: 'exit code was 0' });
+    const r = await proof(h, m.id, d.lease_id, { exit_code: 3, claim: 'exit code was 0' });
     expect(r.verdict).toBe('REJECTED');
     expect(h.app.airlock.getMission(h.operator, m.id).steps[0]!.attempts[0]!.claim).toBe('exit code was 0');
   });
 
-  it('keeps hidden checks hidden from the worker, in the directive and in the patch', () => {
+  it('keeps hidden checks hidden from the worker, in the directive and in the patch', async () => {
     const h = makeHarness();
     const m = open(h, oneStep({ proof: [{ type: 'exit_code' }, { type: 'regex', pattern: 'topsecret-marker', hidden: true }] }));
     const d = pull(h, m.id);
     expect(d.hidden_checks).toBe(1);
     expect(JSON.stringify(d.proof_required)).not.toContain('topsecret');
-    const r = proof(h, m.id, d.lease_id, { exit_code: 0, stdout: 'nope' });
+    const r = await proof(h, m.id, d.lease_id, { exit_code: 0, stdout: 'nope' });
     expect(r.verdict).toBe('REJECTED');
     expect(r.checks.map((c) => c.type)).toEqual(['exit_code', 'hidden']);
     expect(JSON.stringify(r)).not.toContain('topsecret');
@@ -112,50 +112,50 @@ describe('mechanical proof over self-report', () => {
     expect(JSON.stringify(h.app.airlock.getMission(h.operator, m.id))).toContain('topsecret-marker');
   });
 
-  it('completes the mission after the last step and then refuses everything', () => {
+  it('completes the mission after the last step and then refuses everything', async () => {
     const h = makeHarness();
     const m = open(h);
     const d1 = pull(h, m.id);
-    proof(h, m.id, d1.lease_id, goodBuild(d1.nonce));
+    await proof(h, m.id, d1.lease_id, goodBuild(d1.nonce));
     const d2 = pull(h, m.id);
-    expect(proof(h, m.id, d2.lease_id, { stdout: '{"total":"x"}' }).verdict).toBe('REJECTED');
-    expect(proof(h, m.id, d2.lease_id, { stdout: '{"total": 3}' }).verdict).toBe('PASSED');
+    expect((await proof(h, m.id, d2.lease_id, { stdout: '{"total":"x"}' })).verdict).toBe('REJECTED');
+    expect((await proof(h, m.id, d2.lease_id, { stdout: '{"total": 3}' })).verdict).toBe('PASSED');
     const d3 = pull(h, m.id);
-    const last = proof(h, m.id, d3.lease_id, { artifacts: { 'seal.txt': 'sealed' } });
+    const last = await proof(h, m.id, d3.lease_id, { artifacts: { 'seal.txt': 'sealed' } });
     expect(last.verdict).toBe('PASSED');
     expect(last.mission_complete).toBe(true);
     expect(last.message).toMatch(/Mission closed/);
 
     expect(h.app.airlock.getDirective(h.worker, m.id).state).toBe('COMPLETE');
-    expect(codeOf(() => proof(h, m.id, d3.lease_id, { artifacts: { 'seal.txt': 'again' } }))).toBe('CONFLICT');
+    expect(await codeOfAsync(() => proof(h, m.id, d3.lease_id, { artifacts: { 'seal.txt': 'again' } }))).toBe('CONFLICT');
     expect(h.app.airlock.getMission(h.operator, m.id).status).toBe('completed');
   });
 
-  it('rejects malformed and oversize evidence', () => {
+  it('rejects malformed and oversize evidence', async () => {
     const h = makeHarness();
     const m = open(h, oneStep());
     const d = pull(h, m.id);
-    expect(codeOf(() => proof(h, m.id, d.lease_id, { exit_code: 'zero' }))).toBe('INVALID');
+    expect(await codeOfAsync(() => proof(h, m.id, d.lease_id, { exit_code: 'zero' }))).toBe('INVALID');
     const big = Object.fromEntries(Array.from({ length: 6 }, (_, i) => [`f${i}.txt`, 'x'.repeat(200_000)]));
-    expect(codeOf(() => proof(h, m.id, d.lease_id, { exit_code: 0, artifacts: big }))).toBe('PAYLOAD_TOO_LARGE');
+    expect(await codeOfAsync(() => proof(h, m.id, d.lease_id, { exit_code: 0, artifacts: big }))).toBe('PAYLOAD_TOO_LARGE');
   });
 });
 
 describe('leases', () => {
-  it('rejects a wrong lease and an expired lease, then reissues on the next pull', () => {
+  it('rejects a wrong lease and an expired lease, then reissues on the next pull', async () => {
     const h = makeHarness();
     const m = open(h, oneStep());
     const d = pull(h, m.id);
-    expect(codeOf(() => proof(h, m.id, 'lse_wrong', { exit_code: 0 }))).toBe('LEASE_INVALID');
+    expect(await codeOfAsync(() => proof(h, m.id, 'lse_wrong', { exit_code: 0 }))).toBe('LEASE_INVALID');
 
     h.clock.advance(1801 * 1000);
-    expect(codeOf(() => proof(h, m.id, d.lease_id, { exit_code: 0 }))).toBe('LEASE_INVALID');
+    expect(await codeOfAsync(() => proof(h, m.id, d.lease_id, { exit_code: 0 }))).toBe('LEASE_INVALID');
     const d2 = pull(h, m.id);
     expect(d2.lease_id).not.toBe(d.lease_id);
-    expect(proof(h, m.id, d2.lease_id, { exit_code: 0 }).verdict).toBe('PASSED');
+    expect((await proof(h, m.id, d2.lease_id, { exit_code: 0 })).verdict).toBe('PASSED');
   });
 
-  it('pulling twice inside one lease is idempotent', () => {
+  it('pulling twice inside one lease is idempotent', async () => {
     const h = makeHarness();
     const m = open(h, oneStep());
     expect(pull(h, m.id).lease_id).toBe(pull(h, m.id).lease_id);
@@ -163,20 +163,20 @@ describe('leases', () => {
 });
 
 describe('quarantine', () => {
-  const quarantined = () => {
+  const quarantined = async () => {
     const h = makeHarness();
     const m = open(h, oneStep({ max_attempts: 1 }));
     const d = pull(h, m.id);
-    const r = proof(h, m.id, d.lease_id, { exit_code: 1 });
+    const r = await proof(h, m.id, d.lease_id, { exit_code: 1 });
     return { h, m, d, r };
   };
 
-  it('revokes the lease, holds the mission, and stages an approval with a push card', () => {
-    const { h, m, d, r } = quarantined();
+  it('revokes the lease, holds the mission, and stages an approval with a push card', async () => {
+    const { h, m, d, r } = await quarantined();
     expect(r.verdict).toBe('QUARANTINED');
     const hold = h.app.airlock.getDirective(h.worker, m.id);
     expect(hold).toMatchObject({ state: 'HOLD', reason: 'quarantined' });
-    expect(codeOf(() => proof(h, m.id, d.lease_id, { exit_code: 0 }))).toBe('HOLD');
+    expect(await codeOfAsync(() => proof(h, m.id, d.lease_id, { exit_code: 0 }))).toBe('HOLD');
 
     const pending = h.app.approvals.list(h.tenantId, 'pending');
     expect(pending).toHaveLength(1);
@@ -186,21 +186,21 @@ describe('quarantine', () => {
     expect(h.notifier.cards[0]!.voice.class).toBe('Ursa');
   });
 
-  it('authorize re-opens the step with a fresh attempt budget and a new lease', () => {
-    const { h, m, d } = quarantined();
+  it('authorize re-opens the step with a fresh attempt budget and a new lease', async () => {
+    const { h, m, d } = await quarantined();
     const a = h.app.approvals.list(h.tenantId, 'pending')[0]!;
     h.app.airlock.decideApproval(h.tenantId, a.id, 'authorize', undefined, 'operator');
     const d2 = pull(h, m.id);
     expect(d2.lease_id).not.toBe(d.lease_id);
     expect(d2.attempt).toBe(2);
     expect(d2.max_attempts).toBe(2);
-    const done = proof(h, m.id, d2.lease_id, { exit_code: 0 });
+    const done = await proof(h, m.id, d2.lease_id, { exit_code: 0 });
     expect(done.verdict).toBe('PASSED');
     expect(done.mission_complete).toBe(true);
   });
 
-  it('redirect re-opens the step and delivers the operator note behind the Deductive Anchor', () => {
-    const { h, m } = quarantined();
+  it('redirect re-opens the step and delivers the operator note behind the Deductive Anchor', async () => {
+    const { h, m } = await quarantined();
     const a = h.app.approvals.list(h.tenantId, 'pending')[0]!;
     h.app.airlock.decideApproval(h.tenantId, a.id, 'redirect', 'Use the replica database.', 'operator');
     const d2 = pull(h, m.id);
@@ -208,8 +208,8 @@ describe('quarantine', () => {
     expect(d2.directive).toContain('Use the replica database.');
   });
 
-  it('kill terminates the mission for good', () => {
-    const { h, m } = quarantined();
+  it('kill terminates the mission for good', async () => {
+    const { h, m } = await quarantined();
     const a = h.app.approvals.list(h.tenantId, 'pending')[0]!;
     h.app.airlock.decideApproval(h.tenantId, a.id, 'kill', undefined, 'operator');
     expect(h.app.airlock.getDirective(h.worker, m.id).state).toBe('TERMINATED');
@@ -217,14 +217,14 @@ describe('quarantine', () => {
     expect(h.app.approvals.get(h.tenantId, a.id).status).toBe('killed');
   });
 
-  it('a decision applies exactly once', () => {
-    const { h } = quarantined();
+  it('a decision applies exactly once', async () => {
+    const { h } = await quarantined();
     const a = h.app.approvals.list(h.tenantId, 'pending')[0]!;
     h.app.airlock.decideApproval(h.tenantId, a.id, 'authorize', undefined, 'operator');
     expect(codeOf(() => h.app.airlock.decideApproval(h.tenantId, a.id, 'kill', undefined, 'operator'))).toBe('CONFLICT');
   });
 
-  it('operator skip closes a quarantined step without proof and says so in the ledger', () => {
+  it('operator skip closes a quarantined step without proof and says so in the ledger', async () => {
     const h = makeHarness();
     const m = open(h, {
       title: 'Two',
@@ -234,7 +234,7 @@ describe('quarantine', () => {
       ],
     });
     const d = pull(h, m.id);
-    proof(h, m.id, d.lease_id, { exit_code: 1 });
+    await proof(h, m.id, d.lease_id, { exit_code: 1 });
     h.app.airlock.intervene(h.operator, m.id, { action: 'skip', reason: 'known flaky upstream' });
     expect(h.app.approvals.list(h.tenantId, 'pending')).toHaveLength(0);
     const d2 = pull(h, m.id);
@@ -242,7 +242,7 @@ describe('quarantine', () => {
     expect(d2.ledger[0]).toMatch(/skipped by operator/);
   });
 
-  it('skip is only for quarantined steps, and every intervention needs a reason', () => {
+  it('skip is only for quarantined steps, and every intervention needs a reason', async () => {
     const h = makeHarness();
     const m = open(h, oneStep());
     pull(h, m.id);
@@ -254,7 +254,7 @@ describe('quarantine', () => {
 });
 
 describe('roles and tenant isolation', () => {
-  it('workers cannot operate and operators cannot work', () => {
+  it('workers cannot operate and operators cannot work', async () => {
     const h = makeHarness();
     expect(codeOf(() => h.app.airlock.openMission(h.worker, oneStep()))).toBe('FORBIDDEN');
     const m = open(h, oneStep());
@@ -270,7 +270,7 @@ describe('roles and tenant isolation', () => {
     expect(codeOf(() => h.app.airlock.getDirective(rival.worker, m.id))).toBe('NOT_FOUND');
     expect(codeOf(() => h.app.airlock.getMission(rival.operator, m.id))).toBe('NOT_FOUND');
     expect(h.app.airlock.listMissions(rival.operator)).toEqual([]);
-    expect(codeOf(() => h.app.airlock.submitProof(rival.worker, m.id, { lease_id: d.lease_id, evidence: { exit_code: 0 } }))).toBe('NOT_FOUND');
+    expect(await codeOfAsync(() => h.app.airlock.submitProof(rival.worker, m.id, { lease_id: d.lease_id, evidence: { exit_code: 0 } }))).toBe('NOT_FOUND');
 
     const c = await clear(h, m.id, d.lease_id, { kind: 'sql', payload: 'ALTER TABLE t ADD c int' });
     const a = h.app.approvals.list(h.tenantId, 'pending')[0]!;
@@ -278,7 +278,7 @@ describe('roles and tenant isolation', () => {
     expect(codeOf(() => h.app.airlock.decideApproval(rival.operator.tenantId, a.id, 'authorize', undefined, 'operator'))).toBe('NOT_FOUND');
   });
 
-  it('prototype-chain ids are just unknown ids', () => {
+  it('prototype-chain ids are just unknown ids', async () => {
     const h = makeHarness();
     for (const id of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
       expect(codeOf(() => h.app.airlock.getDirective(h.worker, id))).toBe('NOT_FOUND');
@@ -301,7 +301,7 @@ describe('mission definition validation', () => {
 });
 
 describe('metering and burn throttling', () => {
-  it('charges per operation and refuses at zero', () => {
+  it('charges per operation and refuses at zero', async () => {
     const h = makeHarness({ credits: 3 });
     const m = open(h, {
       title: 'Two',
@@ -312,23 +312,23 @@ describe('metering and burn throttling', () => {
     });
     const d = pull(h, m.id);
     expect(h.app.auth.balance(h.tenantId)).toBe(2);
-    proof(h, m.id, d.lease_id, { exit_code: 0 });
+    await proof(h, m.id, d.lease_id, { exit_code: 0 });
     expect(h.app.auth.balance(h.tenantId)).toBe(0);
     expect(codeOf(() => h.app.airlock.getDirective(h.worker, m.id))).toBe('CREDITS_EXHAUSTED');
   });
 
-  it('does not charge for holds or for refused requests', () => {
+  it('does not charge for holds or for refused requests', async () => {
     const h = makeHarness({ credits: 100 });
     const m = open(h, oneStep({ max_attempts: 1 }));
     const d = pull(h, m.id);
-    proof(h, m.id, d.lease_id, { exit_code: 1 });
+    await proof(h, m.id, d.lease_id, { exit_code: 1 });
     const before = h.app.auth.balance(h.tenantId);
     for (let i = 0; i < 5; i++) h.app.airlock.getDirective(h.worker, m.id);
-    codeOf(() => proof(h, m.id, 'lse_wrong', { exit_code: 0 }));
+    await codeOfAsync(() => proof(h, m.id, 'lse_wrong', { exit_code: 0 }));
     expect(h.app.auth.balance(h.tenantId)).toBe(before);
   });
 
-  it('throttles a mission that burns too fast, spends nothing while throttled, and recovers', () => {
+  it('throttles a mission that burns too fast, spends nothing while throttled, and recovers', async () => {
     const h = makeHarness({ policy: { burn_limit_per_min: 3 }, credits: 100 });
     const m = open(h, oneStep());
     for (let i = 0; i < 3; i++) pull(h, m.id);
@@ -378,7 +378,7 @@ describe('action clearance', () => {
     expect(h.app.airlock.clearanceStatus(h.worker, r.clearance_id).status).toBe('PENDING');
     expect(h.app.airlock.missionStatus(h.worker, m.id).status).toBe('paused');
     expect(h.app.airlock.getDirective(h.worker, m.id)).toMatchObject({ state: 'HOLD', reason: 'awaiting_operator' });
-    expect(codeOf(() => proof(h, m.id, d.lease_id, { exit_code: 0 }))).toBe('HOLD');
+    expect(await codeOfAsync(() => proof(h, m.id, d.lease_id, { exit_code: 0 }))).toBe('HOLD');
 
     expect(h.notifier.cards).toHaveLength(1);
     expect(h.notifier.cards[0]!.incident).toContain('ALTER TABLE');
@@ -389,7 +389,7 @@ describe('action clearance', () => {
     const status = h.app.airlock.clearanceStatus(h.worker, r.clearance_id);
     expect(status.status).toBe('CLEARED');
     expect(status.message).toMatch(/Operator authorized/);
-    expect(proof(h, m.id, d.lease_id, { exit_code: 0 }).verdict).toBe('PASSED');
+    expect((await proof(h, m.id, d.lease_id, { exit_code: 0 })).verdict).toBe('PASSED');
   });
 
   it('keeps the lease alive across a long approval wait', async () => {
@@ -399,7 +399,7 @@ describe('action clearance', () => {
     const a = h.app.approvals.list(h.tenantId, 'pending')[0]!;
     h.app.airlock.decideApproval(h.tenantId, a.id, 'authorize', undefined, 'operator');
     h.clock.advance(1700 * 1000);
-    expect(proof(h, m.id, d.lease_id, { exit_code: 0 }).verdict).toBe('PASSED');
+    expect((await proof(h, m.id, d.lease_id, { exit_code: 0 })).verdict).toBe('PASSED');
   });
 
   it('a redirect denies the clearance and carries the note behind the Deductive Anchor', async () => {
@@ -421,7 +421,7 @@ describe('action clearance', () => {
     h.app.airlock.decideApproval(h.tenantId, a.id, 'kill', undefined, 'operator');
     expect(h.app.airlock.clearanceStatus(h.worker, r.clearance_id).status).toBe('TERMINATED');
     expect(h.app.airlock.getDirective(h.worker, m.id).state).toBe('TERMINATED');
-    expect(codeOf(() => proof(h, m.id, d.lease_id, { exit_code: 0 }))).toBe('HOLD');
+    expect(await codeOfAsync(() => proof(h, m.id, d.lease_id, { exit_code: 0 }))).toBe('HOLD');
   });
 
   it('redacts credentials from what the operator is shown', async () => {
@@ -545,7 +545,7 @@ describe('reasoning gate', () => {
     expect(Object.keys(h.app.store.state.clearances)).toHaveLength(0);
   });
 
-  it('tighten() only ever moves toward the stricter verdict', () => {
+  it('tighten() only ever moves toward the stricter verdict', async () => {
     const order: GateVerdict[] = ['allow', 'stage', 'deny'];
     for (const a of order) for (const b of order) {
       expect(tighten(a, b)).toBe(order[Math.max(order.indexOf(a), order.indexOf(b))]);
@@ -559,7 +559,7 @@ describe('telemetry and audit', () => {
     const m = open(h, oneStep());
     const d = pull(h, m.id);
     const noisy = Array.from({ length: 200 }, (_, i) => `line ${i} of chatter`).join('\n');
-    proof(h, m.id, d.lease_id, { exit_code: 1, stdout: noisy });
+    await proof(h, m.id, d.lease_id, { exit_code: 1, stdout: noisy });
     await clear(h, m.id, d.lease_id, { kind: 'sql', payload: 'DROP TABLE users' });
     await clear(h, m.id, d.lease_id, { kind: 'sql', payload: 'ALTER TABLE t ADD c int' });
 
@@ -576,9 +576,9 @@ describe('telemetry and audit', () => {
     const h = makeHarness();
     const m = open(h, oneStep());
     const d = pull(h, m.id);
-    proof(h, m.id, d.lease_id, { exit_code: 1 });
+    await proof(h, m.id, d.lease_id, { exit_code: 1 });
     await clear(h, m.id, d.lease_id, { kind: 'sql', payload: 'DROP TABLE users' });
-    proof(h, m.id, d.lease_id, { exit_code: 0 });
+    await proof(h, m.id, d.lease_id, { exit_code: 0 });
     const types = h.app.store.tenantAudit(h.tenantId, 100).map((r) => r.type);
     for (const t of ['mission.opened', 'directive.issued', 'proof.rejected', 'clearance.denied', 'proof.accepted', 'mission.completed', 'meter.charge']) {
       expect(types).toContain(t);

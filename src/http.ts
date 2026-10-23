@@ -9,7 +9,7 @@ import { CommanderError } from './errors.js';
 import { computeMetrics } from './metrics.js';
 import { buildMcpServer } from './mcp.js';
 import { say } from './persona.js';
-import type { Principal } from './types.js';
+import { ActionRequestSchema, type Principal } from './types.js';
 import type { Clock } from './util.js';
 
 const MAX_BODY = 2 * 1024 * 1024;
@@ -114,6 +114,7 @@ const InterveneBody = z.object({ action: z.enum(['kill', 'skip']), reason: z.str
 const KeyBody = z.object({ label: z.string().max(80).optional() });
 const TenantBody = z.object({ name: z.string().min(1).max(100), credits: z.number().min(0).max(1e9) });
 const TopUpBody = z.object({ amount: z.number().positive().max(1e9) });
+const GuardBody = z.object({ mission_id: z.string().min(1).max(64), tool: z.string().min(1).max(40).optional(), action: ActionRequestSchema });
 
 // ---- server -----------------------------------------------------------------------------------
 
@@ -172,6 +173,13 @@ export function createHttpServer(app: App): Server {
 
     const principal = authenticate(req);
     if (!authed.take(principal.keyId)) throw new CommanderError('THROTTLED', say.throttled(1), { retryAfter: 1 });
+
+    // Native-tool guard: the client-side PreToolUse hook asks here before Bash/Write/Edit run.
+    if (path === '/v1/guard/clearance') {
+      if (method !== 'POST') throw new CommanderError('NOT_FOUND', say.notFound());
+      const body = parse(GuardBody, await readJson(req));
+      return sendJson(res, 200, await app.airlock.requestGuardClearance(principal, body.mission_id, { action: body.action, tool: body.tool }));
+    }
 
     if (path === '/v1/mcp') {
       if (method !== 'POST') {

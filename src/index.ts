@@ -19,6 +19,13 @@ if (!config.notifyWebhook) {
   console.warn('[commander] COMMANDER_NOTIFY_WEBHOOK is unset: staged approvals are logged to stdout instead of pushed.');
 }
 
+if (config.witness.mode === 'local') {
+  console.warn(
+    `[commander] independent witnessing is ON (local): witness commands run on THIS host as THIS user, confined to ${config.witness.root}. ` +
+      'This is not a sandbox. Use it only where the workspace and Commander share a trust domain.',
+  );
+}
+
 server.listen(config.port, config.host, () => {
   console.log(`[commander] listening on http://${config.host}:${config.port}  (MCP: /v1/mcp · HUD: /hud)`);
 });

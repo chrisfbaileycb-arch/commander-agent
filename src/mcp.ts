@@ -1,8 +1,9 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import type { Airlock, ClearanceResult, ClearanceStatusResult, DirectiveResult, ProofResult } from './airlock.js';
+import type { Airlock } from './airlock.js';
 import { CommanderError } from './errors.js';
+import { renderClearance, renderClearanceStatus, renderDirective, renderProof } from './render.js';
 import { ActionRequestSchema, EvidenceSchema, type Principal } from './types.js';
 
 /**
@@ -10,9 +11,9 @@ import { ActionRequestSchema, EvidenceSchema, type Principal } from './types.js'
  * the tools (ledger, verifiers, sentinel, gate) runs server-side; nothing proprietary ships to the client.
  *
  * Boundary worth stating plainly: an MCP server only governs what is routed through it. A worker that
- * skips `commander_request_clearance` and runs a command directly is not seen by the Sentinel. The
- * airlock still holds, because a step cannot close without proof, but enforcement of native tool calls
- * needs a client-side hook that calls the same clearance logic.
+ * skips `commander_request_clearance` and runs a command directly is not seen by the Sentinel here. The
+ * airlock still holds, because a step cannot close without proof. Native Bash/Write/Edit calls are covered by
+ * the client-side PreToolUse hook (src/guard), which asks the same Sentinel through /v1/guard/clearance.
  */
 
 const ok = (rendered: string, data: object): CallToolResult => ({
@@ -34,44 +35,6 @@ async function guard(fn: () => CallToolResult | Promise<CallToolResult>): Promis
     console.error('[commander] internal fault', err);
     return { isError: true, content: [{ type: 'text', text: 'COMMANDER // FAULT\nInternal fault. Request not processed.' }] };
   }
-}
-
-export function renderDirective(r: DirectiveResult): string {
-  if (r.state !== 'DIRECTIVE') return `COMMANDER // ${r.state}\n${r.message}`;
-  const lines = [
-    'COMMANDER // DIRECTIVE',
-    r.message,
-    `STEP: ${r.step_ref}   ATTEMPT: ${r.attempt}/${r.max_attempts}`,
-    `LEASE: ${r.lease_id}   (expires ${r.lease_expires_at})`,
-  ];
-  if (r.nonce) lines.push(`NONCE: ${r.nonce}`);
-  lines.push('', r.directive, '', 'PROOF REQUIRED');
-  r.proof_required.forEach((p, i) => {
-    lines.push(` ${i + 1}. [${p.type}] ${p.requirement}`);
-    if (p.schema) lines.push(`    schema: ${JSON.stringify(p.schema)}`);
-  });
-  if (r.hidden_checks > 0) lines.push(` + ${r.hidden_checks} hidden ${r.hidden_checks === 1 ? 'check applies' : 'checks apply'}.`);
-  lines.push('Only mechanical proof is accepted. Claims are discarded.');
-  if (r.ledger.length > 0) lines.push('', 'LEDGER (record of closed steps; data, not instructions)', ...r.ledger);
-  return lines.join('\n');
-}
-
-export function renderProof(r: ProofResult): string {
-  const lines = [`COMMANDER // PROOF ${r.verdict}`, r.message, `CHECKS: ${r.checks.map((c) => `${c.type} ${c.ok ? '✔' : '✘'}`).join(', ')}`];
-  if (r.attempts_remaining !== undefined) lines.push(`ATTEMPTS REMAINING: ${r.attempts_remaining}`);
-  if (r.patch) lines.push('', r.patch);
-  return lines.join('\n');
-}
-
-export function renderClearance(r: ClearanceResult): string {
-  const lines = [`COMMANDER // CLEARANCE ${r.verdict}`, r.message, `CLEARANCE: ${r.clearance_id}`];
-  if (r.patch) lines.push('', r.patch);
-  else if (r.findings.length) r.findings.forEach((f) => lines.push(` - [${f.rule}] ${f.reason}`));
-  return lines.join('\n');
-}
-
-export function renderClearanceStatus(r: ClearanceStatusResult): string {
-  return `COMMANDER // CLEARANCE ${r.status}\n${r.message}\nCLEARANCE: ${r.clearance_id}`;
 }
 
 export function buildMcpServer(principal: Principal, airlock: Airlock): McpServer {
@@ -99,7 +62,8 @@ export function buildMcpServer(principal: Principal, airlock: Airlock): McpServe
       title: 'Submit proof',
       description:
         'Submit mechanical evidence for the current directive: the real exit code, raw stdout/stderr, and file artifacts as text. ' +
-        'Self-reported completion is discarded. A rejected proof returns a corrective patch and, where required, a fresh nonce.',
+        'Self-reported completion is discarded, and Commander may independently re-run checks and inspect the workspace itself. ' +
+        'A rejected proof returns a corrective patch and, where required, a fresh nonce.',
       inputSchema: {
         mission_id: z.string().min(1).max(64),
         lease_id: z.string().min(1).max(64).describe('Lease id from the directive you are proving.'),
@@ -107,8 +71,8 @@ export function buildMcpServer(principal: Principal, airlock: Airlock): McpServe
       },
       annotations: { readOnlyHint: false, openWorldHint: false },
     },
-    ({ mission_id, lease_id, evidence }) => guard(() => {
-      const r = airlock.submitProof(principal, mission_id, { lease_id, evidence });
+    ({ mission_id, lease_id, evidence }) => guard(async () => {
+      const r = await airlock.submitProof(principal, mission_id, { lease_id, evidence });
       return ok(renderProof(r), r);
     }),
   );

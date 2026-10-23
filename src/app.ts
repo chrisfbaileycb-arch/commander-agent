@@ -6,6 +6,7 @@ import { GeminiGate, NullGate, type ReasoningGate } from './gate.js';
 import { Sentinel } from './sentinel.js';
 import { Store } from './store.js';
 import type { Clock } from './util.js';
+import { LocalWitness, type Witness } from './witness.js';
 
 export interface App {
   config: Config;
@@ -22,6 +23,8 @@ export interface AppOptions {
   /** Override for tests and embedding. */
   notifier?: Notifier;
   gate?: ReasoningGate;
+  /** Override the independent-verification runner (an isolated remote runner, or a fake in tests). */
+  witness?: Witness;
   fetchImpl?: typeof fetch;
 }
 
@@ -49,6 +52,20 @@ export function createApp(opts: AppOptions): App {
     { publicUrl: config.publicUrl, linkTtlSec: config.policy.approval_link_ttl_sec },
     clock,
   );
-  const airlock = new Airlock({ store, auth, sentinel, gate, approvals, policy: config.policy, clock });
+
+  const runner =
+    opts.witness ??
+    (config.witness.mode === 'local' && config.witness.root
+      ? new LocalWitness({
+          root: config.witness.root,
+          allow: config.witness.allow,
+          searchPath: config.witness.path,
+          maxConcurrency: config.witness.concurrency,
+        })
+      : undefined);
+  const { tenants } = config.witness;
+  const witness = runner ? { runner, allows: (tenantId: string) => tenants === '*' || tenants.includes(tenantId) } : undefined;
+
+  const airlock = new Airlock({ store, auth, sentinel, gate, approvals, policy: config.policy, clock, witness });
   return { config, clock, store, auth, approvals, airlock };
 }

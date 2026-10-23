@@ -3,7 +3,7 @@ import { Ajv, type ValidateFunction } from 'ajv';
 import type { Policy } from './config.js';
 import { CommanderError } from './errors.js';
 import { auditDiff } from './inquisitor.js';
-import type { Evidence, StepDef, VerifierResult, VerifierSpec } from './types.js';
+import { isWitnessSpec, type Evidence, type StepDef, type VerifierResult, type VerifierSpec } from './types.js';
 import { byteLength, sanitizeLine, sha256, stableStringify } from './util.js';
 
 /**
@@ -23,7 +23,7 @@ const compiled = new Map<string, ValidateFunction>();
 const REGEX_TIMEOUT_MS = 100;
 const MAX_SCHEMA_BYTES = 65_536;
 
-function compileSchema(schema: Record<string, unknown>): ValidateFunction {
+export function compileSchema(schema: Record<string, unknown>): ValidateFunction {
   const raw = stableStringify(schema);
   if (byteLength(raw) > MAX_SCHEMA_BYTES) throw new Error('schema exceeds 64 KiB');
   const key = sha256(raw);
@@ -37,7 +37,7 @@ function compileSchema(schema: Record<string, unknown>): ValidateFunction {
 }
 
 /** Evaluated in a throwaway VM context with a watchdog so a pathological pattern cannot stall the process. */
-function regexTest(pattern: string, flags: string, input: string): boolean {
+export function regexTest(pattern: string, flags: string, input: string): boolean {
   return runInNewContext('new RegExp(p, f).test(s)', { p: pattern, f: flags, s: input }, { timeout: REGEX_TIMEOUT_MS }) as boolean;
 }
 
@@ -48,6 +48,11 @@ export function validateSpecs(def: StepDef): void {
     try {
       if (spec.type === 'json_schema') compileSchema(spec.schema);
       if (spec.type === 'regex') new RegExp(spec.pattern, spec.flags);
+      if (spec.type === 'witness_command' && spec.stdout_regex) new RegExp(spec.stdout_regex, spec.flags);
+      if (spec.type === 'witness_file') {
+        if (spec.regex) new RegExp(spec.regex, spec.flags);
+        if (spec.schema) compileSchema(spec.schema);
+      }
     } catch (err) {
       throw new CommanderError('INVALID', `${where}: ${sanitizeLine((err as Error).message, 200)}`);
     }
@@ -62,7 +67,7 @@ function resolveTarget(evidence: Evidence, target: string): string | undefined {
   return artifacts && Object.hasOwn(artifacts, name) ? artifacts[name] : undefined;
 }
 
-const result = (spec: VerifierSpec, ok: boolean, reason: string, fix: string): VerifierResult => ({
+export const result = (spec: VerifierSpec, ok: boolean, reason: string, fix: string): VerifierResult => ({
   type: spec.type,
   ok,
   hidden: spec.hidden ?? false,
@@ -183,12 +188,16 @@ function verifyOne(spec: VerifierSpec, ctx: VerifyContext): VerifierResult {
         'Resubmit a patch that stays inside policy: no forbidden paths, no secrets, within the size limit.',
       );
     }
+    case 'witness_command':
+    case 'witness_file':
+      // Independent verifiers run through witness.ts and never reach the evidence runner.
+      return result(spec, false, 'Witness verifier reached the evidence runner. Treated as failed.', 'Contact the operator.');
   }
 }
 
 /** Runs every verifier (no short-circuit) so the redirect patch can name every failure at once. */
 export function runVerifiers(def: StepDef, ctx: VerifyContext): VerifierResult[] {
-  const specs: VerifierSpec[] = [...def.proof];
+  const specs: VerifierSpec[] = def.proof.filter((s) => !isWitnessSpec(s));
   if (def.require_nonce && !specs.some((s) => s.type === 'nonce_present')) specs.push({ type: 'nonce_present' });
   return specs.map((spec) => {
     try {

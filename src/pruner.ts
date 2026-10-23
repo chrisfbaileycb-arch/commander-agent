@@ -15,6 +15,8 @@ export interface PruneInput {
   passed: boolean;
   results: VerifierResult[];
   evidence: Evidence;
+  /** How many of `results` came from independent verification rather than worker-supplied evidence. */
+  witnessed?: number;
 }
 
 export interface PruneOutput {
@@ -75,7 +77,8 @@ export function prune(input: PruneInput): PruneOutput {
     const exit = evidence.exit_code === undefined ? '' : `, exit ${evidence.exit_code}`;
     const facts = [...metrics(`${evidence.stdout ?? ''}\n${evidence.stderr ?? ''}`), ...artifactFacts(evidence)];
     manifest =
-      `- **${title}** — verified on attempt ${attempt}; ${results.length}/${results.length} checks passed${exit}.` +
+      `- **${title}** — verified on attempt ${attempt}; ${results.length}/${results.length} checks passed` +
+      `${input.witnessed ? ` (${input.witnessed} independently witnessed)` : ''}${exit}.` +
       (facts.length ? ` Evidence: ${facts.join('; ')}.` : '');
   } else {
     const failed = results.filter((r) => !r.ok);

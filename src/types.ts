@@ -17,6 +17,15 @@ const ArtifactName = z
 
 const Target = z.string().regex(/^(stdout|stderr|artifact:[A-Za-z0-9_][\w.\-/]{0,119})$/);
 const Hidden = { hidden: z.boolean().optional() };
+/** Paths for independent verification are always relative to the witness workspace and may not climb out of it. */
+const WorkspacePath = z
+  .string()
+  .min(1)
+  .max(300)
+  .refine(
+    (p) => !p.includes('\0') && !p.startsWith('/') && !/^[A-Za-z]:/.test(p) && !p.split(/[\\/]/).includes('..'),
+    'must be a relative path inside the workspace',
+  );
 
 export const VerifierSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('exit_code'), expected: z.number().int().default(0), ...Hidden }),
@@ -39,8 +48,34 @@ export const VerifierSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('artifact_hash'), name: ArtifactName, sha256: z.string().regex(/^[a-f0-9]{64}$/), ...Hidden }),
   z.object({ type: z.literal('nonce_present'), ...Hidden }),
   z.object({ type: z.literal('diff_policy'), artifact: ArtifactName, ...Hidden }),
+  // Independent verification: Commander checks the workspace itself instead of trusting submitted output.
+  z.object({
+    type: z.literal('witness_command'),
+    /** Executable and arguments. No shell is involved, and nothing from the worker is ever interpolated. */
+    argv: z.array(z.string().min(1).max(512)).min(1).max(32),
+    cwd: WorkspacePath.optional(),
+    expected_exit: z.number().int().min(0).max(255).default(0),
+    timeout_sec: z.number().int().min(1).max(900).default(120),
+    stdout_regex: z.string().min(1).max(256).optional(),
+    flags: z.string().regex(/^[imsu]*$/).default(''),
+    ...Hidden,
+  }),
+  z.object({
+    type: z.literal('witness_file'),
+    path: WorkspacePath,
+    min_bytes: z.number().int().min(0).default(0),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    regex: z.string().min(1).max(256).optional(),
+    flags: z.string().regex(/^[imsu]*$/).default(''),
+    schema: z.record(z.string(), z.unknown()).optional(),
+    /** The submitted artifact of this name must be byte-identical to the file on disk. */
+    matches_artifact: ArtifactName.optional(),
+    ...Hidden,
+  }),
 ]);
 export type VerifierSpec = z.infer<typeof VerifierSchema>;
+export type WitnessSpec = Extract<VerifierSpec, { type: 'witness_command' | 'witness_file' }>;
+export const isWitnessSpec = (s: VerifierSpec): s is WitnessSpec => s.type === 'witness_command' || s.type === 'witness_file';
 
 export const RiskTierSchema = z.enum(['routine', 'elevated', 'critical']);
 export type RiskTier = z.infer<typeof RiskTierSchema>;
@@ -169,6 +204,10 @@ export interface Clearance {
   findings: Finding[];
   note?: string;
   approvalId?: string;
+  /** `guard` = a native tool call vetted by the client-side hook; `mcp` = requested through the MCP tool. */
+  source?: 'mcp' | 'guard';
+  /** A guard authorization is single-use: the operator approves one retry of exactly this action. */
+  consumed?: boolean;
   createdAt: string;
 }
 

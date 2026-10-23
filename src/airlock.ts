@@ -4,27 +4,33 @@ import type { Policy } from './config.js';
 import { CommanderError } from './errors.js';
 import { tighten, type GateVerdict, type ReasoningGate } from './gate.js';
 import { redactSecrets } from './inquisitor.js';
-import { redirectPatch, say, type HoldReason } from './persona.js';
+import { actionRedirectPatch, redirectPatch, say, type HoldReason } from './persona.js';
 import { prune, rawEvidenceText } from './pruner.js';
-import type { Sentinel } from './sentinel.js';
+import { normalizeAction, type Sentinel } from './sentinel.js';
 import type { Store } from './store.js';
 import {
   ActionRequestSchema,
   EvidenceSchema,
   MAX_EVIDENCE_BYTES,
   MissionDefSchema,
+  isWitnessSpec,
+  type ActionRequest,
   type Approval,
   type Attempt,
   type Clearance,
+  type Evidence,
   type Finding,
   type Mission,
+  type MissionDef,
   type Principal,
   type StepState,
   type VerifierResult,
   type VerifierSpec,
+  type WitnessSpec,
 } from './types.js';
-import { byteLength, iso, newId, sanitizeLine, sha256, stableStringify, type Clock } from './util.js';
+import { byteLength, iso, newId, sanitizeLine, sha256, shellQuote, stableStringify, type Clock } from './util.js';
 import { runVerifiers, validateSpecs } from './verifiers.js';
+import { runWitnessVerifiers, type Witness } from './witness.js';
 
 /**
  * The Step-Gated Airlock.
@@ -42,6 +48,8 @@ export interface AirlockDeps {
   approvals: Approvals;
   policy: Policy;
   clock: Clock;
+  /** Present only when independent witnessing is enabled on this deployment. */
+  witness?: { runner: Witness; allows: (tenantId: string) => boolean };
 }
 
 export interface ProofRequirement {
@@ -80,6 +88,8 @@ export interface ProofResult {
   nonce?: string;
   manifest?: string;
   mission_complete?: boolean;
+  /** How many of the checks Commander ran itself rather than taking the worker's word. */
+  witnessed?: number;
 }
 
 export interface ClearanceResult {
@@ -122,10 +132,35 @@ function describeSpec(spec: VerifierSpec): ProofRequirement | null {
       return { type: spec.type, requirement: 'Include the attempt nonce verbatim in stdout, stderr, or an artifact.' };
     case 'diff_policy':
       return { type: spec.type, requirement: `Submit artifact "${spec.artifact}" as a unified diff that stays inside policy (no forbidden paths, no secrets, size limit).` };
+    case 'witness_command': {
+      const cmd = sanitizeLine(spec.argv.join(' '), 120);
+      return {
+        type: spec.type,
+        requirement:
+          `Commander will independently run "${cmd}"${spec.cwd ? ` in ${spec.cwd}` : ''} and require exit code ${spec.expected_exit}` +
+          `${spec.stdout_regex ? ` with stdout matching /${spec.stdout_regex}/${spec.flags}` : ''}. Your reported exit code is not used.`,
+      };
+    }
+    case 'witness_file': {
+      const needs = [
+        spec.min_bytes > 0 ? `at least ${spec.min_bytes} bytes` : '',
+        spec.sha256 ? 'an exact hash' : '',
+        spec.regex ? `content matching /${spec.regex}/${spec.flags}` : '',
+        spec.schema ? 'JSON satisfying a schema' : '',
+        spec.matches_artifact ? `to be identical to your artifact "${spec.matches_artifact}"` : '',
+      ].filter(Boolean);
+      return {
+        type: spec.type,
+        requirement: `Commander will independently inspect "${spec.path}" in the workspace and require ${needs.length ? needs.join(', ') : 'that it exists'}.`,
+      };
+    }
   }
 }
 
 export class Airlock {
+  /** Steps whose proof is being audited right now. Guards the await inside independent verification. */
+  private readonly auditing = new Set<string>();
+
   constructor(private readonly d: AirlockDeps) {}
 
   private get state() {
@@ -143,6 +178,7 @@ export class Airlock {
     }
     const def = parsed.data;
     for (const step of def.steps) validateSpecs(step);
+    this.checkWitnessSteps(p, def);
 
     const now = iso(this.d.clock());
     const mission: Mission = {
@@ -167,6 +203,33 @@ export class Airlock {
     this.d.store.audit(p.tenantId, 'mission.opened', { missionId: mission.id, title: def.title, steps: def.steps.length });
     this.d.store.touch();
     return missionView(mission);
+  }
+
+  /**
+   * Independent verification executes commands, so it is rejected up front, not discovered at the first
+   * submission: it must be enabled for this tenant, and every command must pass the same static rules that
+   * govern workers. Witness commands are read-only checks, so anything the Sentinel would stage is refused too.
+   */
+  private checkWitnessSteps(p: Principal, def: MissionDef): void {
+    const commands: { step: string; argv: string[] }[] = [];
+    let usesWitness = false;
+    for (const step of def.steps) {
+      for (const spec of step.proof) {
+        if (!isWitnessSpec(spec)) continue;
+        usesWitness = true;
+        if (spec.type === 'witness_command') commands.push({ step: step.title, argv: spec.argv });
+      }
+    }
+    if (!usesWitness) return;
+    if (!this.d.witness) throw new CommanderError('INVALID', say.invalid('Independent witnessing is not enabled on this deployment.'));
+    if (!this.d.witness.allows(p.tenantId)) throw new CommanderError('INVALID', say.invalid('Independent witnessing is not enabled for this tenant.'));
+    for (const c of commands) {
+      const scan = this.d.sentinel.scan({ kind: 'shell', payload: c.argv.map(shellQuote).join(' ') }, { ignoreStrict: true });
+      if (scan.verdict !== 'allow') {
+        const rules = scan.findings.map((f) => f.rule).join(', ');
+        throw new CommanderError('INVALID', say.invalid(`Step "${sanitizeLine(c.step, 60)}": witness command is not a safe read-only check (${rules}).`));
+      }
+    }
   }
 
   listMissions(p: Principal): ReturnType<typeof missionView>[] {
@@ -264,12 +327,15 @@ export class Airlock {
 
   // ---- worker: proof --------------------------------------------------------------------------
 
-  submitProof(p: Principal, missionId: string, input: { lease_id: string; evidence: unknown }): ProofResult {
+  async submitProof(p: Principal, missionId: string, input: { lease_id: string; evidence: unknown }): Promise<ProofResult> {
     this.d.auth.requireRole(p, 'worker');
     const m = lookup(this.state.missions, missionId, p.tenantId);
     this.requireActive(m);
     const step = this.currentStep(m);
     this.requireLease(step, input.lease_id);
+    if (this.auditing.has(step.id)) {
+      throw new CommanderError('CONFLICT', say.conflict('A proof for this step is already being audited.'));
+    }
 
     const parsed = EvidenceSchema.safeParse(input.evidence);
     if (!parsed.success) {
@@ -281,17 +347,56 @@ export class Airlock {
       throw new CommanderError('PAYLOAD_TOO_LARGE', say.invalid('Evidence exceeds 1 MiB.'));
     }
 
+    // Fail closed: a step that demands independent checks never passes on worker evidence alone.
+    const witnessSpecs = step.def.proof.filter(isWitnessSpec);
+    if (witnessSpecs.length > 0 && !this.d.witness?.allows(p.tenantId)) {
+      throw new CommanderError('CONFLICT', say.conflict('Independent verification is unavailable for this mission. Operator action required.'));
+    }
+
     this.d.auth.charge(p, 'proof', m.id);
 
+    // Reserved before the first await, so a second submission cannot interleave with the audit.
+    this.auditing.add(step.id);
+    try {
+      return await this.auditProof(p, m, step, input.lease_id, evidence, witnessSpecs);
+    } finally {
+      this.auditing.delete(step.id);
+    }
+  }
+
+  private async auditProof(p: Principal, m: Mission, step: StepState, leaseId: string, evidence: Evidence, witnessSpecs: WitnessSpec[]): Promise<ProofResult> {
     const evidenceHash = sha256(stableStringify({ ...evidence, claim: undefined }));
-    const replay = step.attempts.some((a) => a.evidenceHash === evidenceHash);
-    const results: VerifierResult[] = replay
-      ? [{ type: 'replay', ok: false, hidden: false, reason: 'Identical evidence was already submitted.', fix: 'Regenerate the proof from a fresh run.' }]
-      : runVerifiers(step.def, { evidence, nonce: step.nonce, policy: this.d.policy });
+    // With independent checks, identical worker evidence is legitimate: the disk may have changed since the last attempt.
+    const replay = witnessSpecs.length === 0 && step.attempts.some((a) => a.evidenceHash === evidenceHash);
+
+    let results: VerifierResult[];
+    let witnessed = 0;
+    if (replay) {
+      results = [{ type: 'replay', ok: false, hidden: false, reason: 'Identical evidence was already submitted.', fix: 'Regenerate the proof from a fresh run.' }];
+    } else {
+      results = runVerifiers(step.def, { evidence, nonce: step.nonce, policy: this.d.policy });
+      // Only spend a (possibly slow) independent run on evidence that already holds up on its face.
+      if (witnessSpecs.length > 0 && results.every((r) => r.ok)) {
+        this.d.auth.charge(p, 'witness', m.id);
+        const witnessResults = await runWitnessVerifiers(witnessSpecs, {
+          witness: this.d.witness!.runner,
+          evidence,
+          budgetMs: this.d.policy.witness_budget_sec * 1000,
+          maxOutputBytes: this.d.policy.witness_max_output_bytes,
+          maxFileBytes: 1_048_576,
+        });
+        // The world may have moved while the commands ran. Discard the audit rather than record it against a dead lease.
+        if (m.status !== 'active' || m.steps[m.current] !== step || !this.leaseValid(step, leaseId)) {
+          throw new CommanderError('LEASE_INVALID', say.leaseInvalid());
+        }
+        results = [...results, ...witnessResults];
+        witnessed = witnessResults.length;
+      }
+    }
     const passed = results.every((r) => r.ok);
 
     const n = step.attempts.length + 1;
-    const pruned = prune({ stepTitle: step.def.title, attempt: n, passed, results, evidence });
+    const pruned = prune({ stepTitle: step.def.title, attempt: n, passed, results, evidence, witnessed });
     const attempt: Attempt = {
       n,
       at: iso(this.d.clock()),
@@ -312,6 +417,7 @@ export class Airlock {
       attempt: n,
       evidenceHash,
       failed: failedTypes,
+      witnessed,
       rawTokens: pruned.rawTokens,
       prunedTokens: pruned.prunedTokens,
     });
@@ -328,6 +434,7 @@ export class Airlock {
         checks,
         manifest: pruned.manifest,
         mission_complete: complete,
+        witnessed: witnessed || undefined,
       };
     }
 
@@ -361,6 +468,7 @@ export class Airlock {
       checks,
       attempts_remaining: remaining,
       nonce: step.nonce,
+      witnessed: witnessed || undefined,
       patch: redirectPatch({
         attempt: n + 1,
         max: step.attemptBudget,
@@ -373,20 +481,66 @@ export class Airlock {
 
   // ---- worker: action clearance ---------------------------------------------------------------
 
+  /** Clearance requested through the MCP tool: the worker names its lease. */
   async requestClearance(p: Principal, missionId: string, input: { lease_id: string; action: unknown }): Promise<ClearanceResult> {
     this.d.auth.requireRole(p, 'worker');
     const m = lookup(this.state.missions, missionId, p.tenantId);
     this.requireActive(m);
     const step = this.currentStep(m);
     this.requireLease(step, input.lease_id);
+    return this.adjudicate(p, m, step, input.lease_id, this.parseAction(input.action), { source: 'mcp' });
+  }
 
-    const parsed = ActionRequestSchema.safeParse(input.action);
+  /**
+   * Clearance requested by the client-side hook for a NATIVE tool call (Bash, Write, Edit...). The hook cannot know
+   * the lease id, so the mission is the handle: the action is judged against the mission's current released step.
+   */
+  async requestGuardClearance(p: Principal, missionId: string, input: { action: unknown; tool?: string }): Promise<ClearanceResult> {
+    this.d.auth.requireRole(p, 'worker');
+    const m = lookup(this.state.missions, missionId, p.tenantId);
+    this.requireActive(m);
+    const step = this.currentStep(m);
+    const lease = step.lease;
+    if (!lease || lease.revoked || lease.expiresAt <= this.d.clock()) throw new CommanderError('LEASE_INVALID', say.leaseInvalid());
+    return this.adjudicate(p, m, step, lease.id, this.parseAction(input.action), { source: 'guard', tool: input.tool });
+  }
+
+  private parseAction(raw: unknown): ActionRequest {
+    const parsed = ActionRequestSchema.safeParse(raw);
     if (!parsed.success) {
       const issue = parsed.error.issues[0];
       throw new CommanderError('INVALID', say.invalid(`action.${issue?.path.join('.') || 'body'}: ${issue?.message ?? 'malformed'}.`));
     }
-    const action = parsed.data;
+    return parsed.data;
+  }
+
+  private async adjudicate(
+    p: Principal,
+    m: Mission,
+    step: StepState,
+    leaseId: string,
+    action: ActionRequest,
+    via: { source: 'mcp' | 'guard'; tool?: string },
+  ): Promise<ClearanceResult> {
     this.d.auth.charge(p, 'clearance', m.id);
+
+    // A native action the operator already authorized is cleared exactly once, without a second round trip.
+    if (via.source === 'guard') {
+      const token = this.takeAuthorization(m, step, action);
+      if (token) {
+        this.d.store.audit(p.tenantId, 'clearance.allowed', {
+          missionId: m.id,
+          stepId: step.id,
+          clearanceId: token.id,
+          kind: action.kind,
+          actionHash: token.actionHash,
+          via: via.source,
+          tool: via.tool,
+          authorized: true,
+        });
+        return { verdict: 'CLEARED', clearance_id: token.id, message: say.authorized(), findings: [] };
+      }
+    }
 
     const decision = this.d.sentinel.evaluate(m.id, action);
     let verdict: GateVerdict = decision.verdict;
@@ -401,7 +555,7 @@ export class Airlock {
       this.d.auth.charge(p, 'gate', m.id);
       const review = await this.d.gate.review({ stepTitle: step.def.title, directive: step.def.directive, action, findings });
       // The world may have moved while the gate deliberated.
-      if (m.status !== 'active' || !this.leaseValid(step, input.lease_id)) {
+      if (m.status !== 'active' || !this.leaseValid(step, leaseId)) {
         throw new CommanderError('LEASE_INVALID', say.leaseInvalid());
       }
       verdict = tighten(verdict, review.verdict);
@@ -421,32 +575,36 @@ export class Airlock {
       summary,
       status: verdict === 'allow' ? 'allow' : verdict === 'deny' ? 'denied' : 'pending',
       findings,
+      source: via.source,
       createdAt: iso(this.d.clock()),
     };
     this.state.clearances[clearance.id] = clearance;
     const shown = findings.map((f) => ({ rule: f.rule, reason: f.reason }));
-    const audit = { missionId: m.id, stepId: step.id, clearanceId: clearance.id, kind: action.kind, actionHash: decision.actionHash, rules: findings.map((f) => f.rule) };
+    const audit = {
+      missionId: m.id,
+      stepId: step.id,
+      clearanceId: clearance.id,
+      kind: action.kind,
+      actionHash: decision.actionHash,
+      rules: findings.map((f) => f.rule),
+      via: via.source,
+      tool: via.tool,
+    };
 
     if (verdict === 'deny') {
       this.d.store.audit(p.tenantId, 'clearance.denied', audit);
       this.d.store.touch();
-      const lines = findings.map((f, i) => ` ${i + 1}. [${f.rule}] ${f.reason}`);
-      return {
-        verdict: 'DENIED',
-        clearance_id: clearance.id,
-        message: say.denied(),
-        findings: shown,
-        patch: ['REDIRECT PATCH', 'TRIPPED RULES', ...lines, 'Select a safe alternative that serves the directive. Do not retry this action.'].join('\n'),
-      };
+      return { verdict: 'DENIED', clearance_id: clearance.id, message: say.denied(), findings: shown, patch: actionRedirectPatch(shown) };
     }
 
     if (verdict === 'stage') {
+      const label = via.source === 'guard' ? `NATIVE ${via.tool ?? action.kind}` : action.kind.toUpperCase();
       const approval = this.d.approvals.create({
         tenantId: p.tenantId,
         missionId: m.id,
         stepId: step.id,
         kind: 'clearance',
-        incident: `${action.kind.toUpperCase()}: ${summary}`,
+        incident: `${label}: ${summary}`,
         reason: findings.map((f) => f.reason).join(' ').slice(0, 400),
         clearanceId: clearance.id,
         missionTitle: m.title,
@@ -463,6 +621,25 @@ export class Airlock {
     this.d.store.audit(p.tenantId, 'clearance.allowed', audit);
     this.d.store.touch();
     return { verdict: 'CLEARED', clearance_id: clearance.id, message: say.cleared(), findings: shown };
+  }
+
+  /**
+   * An operator authorization of a staged native action is a single-use pass for that exact action on that exact
+   * step, valid for one lease lifetime. Anything else, including the same action later, is judged afresh.
+   */
+  private takeAuthorization(m: Mission, step: StepState, action: ActionRequest): Clearance | undefined {
+    const hash = sha256(normalizeAction(action));
+    const now = this.d.clock();
+    for (const c of Object.values(this.state.clearances)) {
+      if (c.source !== 'guard' || c.consumed || c.status !== 'allow' || !c.approvalId) continue;
+      if (c.missionId !== m.id || c.stepId !== step.id || c.actionHash !== hash) continue;
+      const decidedAt = this.state.approvals[c.approvalId]?.decidedAt;
+      if (!decidedAt || now - Date.parse(decidedAt) > this.d.policy.lease_ttl_sec * 1000) continue;
+      c.consumed = true;
+      this.d.store.touch();
+      return c;
+    }
+    return undefined;
   }
 
   clearanceStatus(p: Principal, clearanceId: string): ClearanceStatusResult {

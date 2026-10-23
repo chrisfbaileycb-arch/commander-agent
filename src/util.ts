@@ -39,3 +39,8 @@ export const estimateTokens = (s: string): number => Math.ceil(s.length / 4);
 export function stripAnsi(s: string): string {
   return s.replace(ANSI, '');
 }
+
+/** POSIX single-quote an argument so an argv array can be rendered as one shell line for static analysis. */
+export function shellQuote(arg: string): string {
+  return /^[\w@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
+}

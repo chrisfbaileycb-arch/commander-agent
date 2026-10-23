@@ -9,6 +9,8 @@
   "repetition_window_sec": 600,
   "lease_ttl_sec": 1800,
   "burn_limit_per_min": 60,
-  "credit_costs": { "directive": 1, "proof": 2, "clearance": 1, "gate": 5 },
-  "approval_link_ttl_sec": 1800
+  "credit_costs": { "directive": 1, "proof": 2, "clearance": 1, "gate": 5, "witness": 3 },
+  "approval_link_ttl_sec": 1800,
+  "witness_budget_sec": 600,
+  "witness_max_output_bytes": 262144
 }

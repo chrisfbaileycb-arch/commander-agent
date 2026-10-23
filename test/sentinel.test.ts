@@ -199,6 +199,67 @@ describe('fs', () => {
   });
 });
 
+describe('agent guard configuration is protected from the agent it guards', () => {
+  it.each([
+    '.claude/settings.json',
+    '.claude/settings.local.json',
+    '.claude/hooks/pre-tool.sh',
+    'proj/.claude/settings.json',
+    '/home/dev/proj/.claude/settings.json',
+  ])('denies writing %s', (p) => {
+    expect(verdict('fs', p, { intent: 'write' })).toBe('deny');
+  });
+
+  it('still lets the agent read it, and edit other files in .claude/', () => {
+    expect(verdict('fs', '.claude/settings.json', { intent: 'read' })).toBe('allow');
+    expect(verdict('fs', '.claude/notes.md', { intent: 'write' })).toBe('allow');
+    expect(verdict('fs', 'docs/claude-settings.json', { intent: 'write' })).toBe('allow');
+  });
+
+  it.each([
+    "sed -i 's/PreToolUse//' .claude/settings.json",
+    'echo {} > .claude/settings.local.json',
+    'rm -rf .claude/hooks/',
+    'node dist/guard/claude-hook.js',
+    'mv ~/.claude/hooks/x.sh /tmp/',
+    'bash -c "echo x >> .claude/settings.json"',
+  ])('stages a shell command that touches it: %s', (cmd) => {
+    const d = mk().sentinel.scan({ kind: 'shell', payload: cmd });
+    expect(d.verdict).toBe('stage');
+    expect(d.findings.map((f) => f.rule)).toContain('shell.agent-config');
+  });
+
+  it('does not flag unrelated commands that merely mention claude', () => {
+    expect(verdict('shell', 'ls docs')).toBe('allow');
+    expect(verdict('shell', 'echo "ask claude about it" > notes.txt')).toBe('allow');
+  });
+});
+
+describe('scan is stateless; evaluate adds loop detection', () => {
+  const act: ActionRequest = { kind: 'shell', payload: 'npm test' };
+
+  it('never counts repetitions, however often an operator-authored command is vetted', () => {
+    const { sentinel } = mk();
+    for (let i = 0; i < 20; i++) expect(sentinel.scan(act).verdict).toBe('allow');
+    expect(sentinel.evaluate('m1', act).verdict).toBe('allow'); // the scans left no trace
+  });
+
+  it('agrees with evaluate on every rule that is not about repetition', () => {
+    const { sentinel } = mk();
+    for (const a of [{ kind: 'shell', payload: 'rm -rf /' }, { kind: 'shell', payload: 'kubectl apply -f x.yaml' }, { kind: 'fs', payload: '.env', intent: 'read' }] as ActionRequest[]) {
+      const fresh = mk().sentinel;
+      expect(sentinel.scan(a).verdict).toBe(fresh.evaluate('m1', a).verdict);
+    }
+  });
+
+  it('can set aside strict-shell for operator checks without touching any other rule', () => {
+    const { sentinel } = mk({ strict_shell: true, shell_allowlist: [] });
+    expect(sentinel.scan({ kind: 'shell', payload: 'node --test' }).verdict).toBe('stage');
+    expect(sentinel.scan({ kind: 'shell', payload: 'node --test' }, { ignoreStrict: true }).verdict).toBe('allow');
+    expect(sentinel.scan({ kind: 'shell', payload: 'rm -rf /' }, { ignoreStrict: true }).verdict).toBe('deny');
+  });
+});
+
 describe('always-staged kinds and declared intent', () => {
   it('stages deploy and payment actions', () => {
     expect(verdict('deploy', 'release v1.2')).toBe('stage');

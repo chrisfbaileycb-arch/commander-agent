@@ -152,6 +152,13 @@ const RAW_PATTERNS: [RegExp, Finding][] = [
   [/>\s*\/dev\/(?:sd|hd|vd|xvd|nvme|mmcblk)\w*/, deny('shell.disk-overwrite', 'Redirect into a block device.')],
 ];
 
+/**
+ * The guard is only as strong as its configuration, so an agent must not be able to quietly edit it away.
+ * Shell: any mention of the agent's settings or hook files needs a human. Files: mutation is denied outright.
+ */
+const AGENT_CONFIG_LINE = /(?:^|[\s/'"=])\.claude\/(?:settings(?:\.local)?\.json|hooks\/)|claude-hook(?:\.js)?\b/;
+const AGENT_CONFIG_PATH = /(?:^|\/)\.claude\/(?:settings(?:\.local)?\.json|hooks\/)/;
+
 const PROD_RULES: { label: string; test: (name: string, args: string[]) => boolean }[] = [
   { label: 'package publish', test: (n, a) => ['npm', 'pnpm', 'yarn', 'cargo', 'twine'].includes(n) && ['publish', 'upload'].includes(a[0] ?? '') },
   { label: 'container push', test: (n, a) => ['docker', 'podman'].includes(n) && a.includes('push') },
@@ -245,6 +252,7 @@ function scanShell(line: string, policy: Policy, depth = 0): Finding[] {
   if (depth > 3) return [stage('shell.nesting', 'Command nesting too deep to verify.')];
 
   for (const [re, finding] of RAW_PATTERNS) if (re.test(line)) findings.push(finding);
+  if (AGENT_CONFIG_LINE.test(line)) findings.push(stage('shell.agent-config', 'Touches the agent guard configuration.'));
 
   const { cmds, subs } = tokenize(line);
   for (const sub of subs) findings.push(...scanShell(sub, policy, depth + 1));
@@ -380,6 +388,9 @@ function scanFs(payload: string, intent: ActionRequest['intent'], policy: Policy
   if (mutating && /^\/(?:etc|boot|sys|proc|dev|usr|bin|sbin|lib\d*)(?:\/|$)/.test(path)) {
     findings.push(deny('fs.system-path', 'Mutation of a system path.'));
   }
+  if (mutating && AGENT_CONFIG_PATH.test(path)) {
+    findings.push(deny('fs.agent-config', 'The agent guard configuration may not be modified by the agent.'));
+  }
   return findings;
 }
 
@@ -393,21 +404,34 @@ export class Sentinel {
     private readonly clock: Clock,
   ) {}
 
-  /** Rules on a declared action. Stateful only for repetition (loop) detection. */
+  /** Rules on a declared action, plus loop detection (the only stateful part). */
   evaluate(missionId: string, action: ActionRequest): SentinelDecision {
+    const base = this.scan(action);
+    const repeated = this.observe(missionId, base.actionHash);
+    if (!repeated) return base;
+    const loop = deny('loop.repetition', `Identical action issued ${repeated} times inside ${this.policy.repetition_window_sec}s.`);
+    return { verdict: 'deny', findings: [...base.findings, loop], actionHash: base.actionHash };
+  }
+
+  /**
+   * Rules only, no state. Used to vet operator-authored commands without counting them as repetitions.
+   * `ignoreStrict` skips the strict-shell allowlist, which governs worker commands, not operator checks.
+   */
+  scan(action: ActionRequest, opts: { ignoreStrict?: boolean } = {}): SentinelDecision {
+    const policy = opts.ignoreStrict ? { ...this.policy, strict_shell: false } : this.policy;
     const findings: Finding[] = [];
     switch (action.kind) {
       case 'shell':
-        findings.push(...scanShell(action.payload, this.policy));
+        findings.push(...scanShell(action.payload, policy));
         break;
       case 'sql':
         findings.push(...scanSql(action.payload));
         break;
       case 'http':
-        findings.push(...scanHttp(action.payload, this.policy));
+        findings.push(...scanHttp(action.payload, policy));
         break;
       case 'fs':
-        findings.push(...scanFs(action.payload, action.intent, this.policy));
+        findings.push(...scanFs(action.payload, action.intent, policy));
         break;
       case 'deploy':
         if (action.intent !== 'read') findings.push(stage('deploy.always-staged', 'Deployments require operator authorization.'));
@@ -425,9 +449,6 @@ export class Sentinel {
     if (action.intent === 'production_push') findings.push(stage('intent.production-push', 'Declared production push.'));
 
     const actionHash = sha256(normalizeAction(action));
-    const repeated = this.observe(missionId, actionHash);
-    if (repeated) findings.push(deny('loop.repetition', `Identical action issued ${repeated} times inside ${this.policy.repetition_window_sec}s.`));
-
     const unique = [...new Map(findings.map((f) => [`${f.rule}|${f.reason}`, f])).values()];
     const verdict = unique.some((f) => f.verdict === 'deny') ? 'deny' : unique.some((f) => f.verdict === 'stage') ? 'stage' : 'allow';
     return { verdict, findings: unique, actionHash };

@@ -4,6 +4,7 @@
   "description": "Sovereign supervisory control plane for third-party agents: step-gated airlock, mechanical proof auditing, MCP gateway.",
   "private": true,
   "type": "module",
+  "bin": { "commander-guard": "dist/guard/claude-hook.js" },
   "engines": {
     "node": ">=22"
   },
@@ -13,7 +14,8 @@
     "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "demo": "tsx scripts/demo.ts"
+    "demo": "tsx scripts/demo.ts",
+    "guard:settings": "tsx src/guard/claude-hook.ts --print-settings"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

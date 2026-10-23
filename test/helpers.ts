@@ -5,6 +5,7 @@ import { defaultPolicy, loadConfig, type Policy } from '../src/config.js';
 import type { CommanderError } from '../src/errors.js';
 import type { ReasoningGate } from '../src/gate.js';
 import type { Principal } from '../src/types.js';
+import type { FileInspection, RunRequest, RunResult, Witness } from '../src/witness.js';
 
 export class FakeClock {
   t = Date.UTC(2026, 0, 1, 12, 0, 0);
@@ -21,6 +22,30 @@ export class CaptureNotifier implements Notifier {
   }
 }
 
+/** A scriptable stand-in for an independent runner: records what it was asked and answers from canned data. */
+export class FakeWitness implements Witness {
+  readonly kind = 'fake';
+  runs: RunRequest[] = [];
+  inspections: string[] = [];
+  files = new Map<string, FileInspection>();
+  runImpl: (req: RunRequest) => RunResult | Promise<RunResult> = () => ({
+    exitCode: 0,
+    stdout: '',
+    stderr: '',
+    truncated: false,
+    timedOut: false,
+    durationMs: 1,
+  });
+  async run(req: RunRequest): Promise<RunResult> {
+    this.runs.push(req);
+    return this.runImpl(req);
+  }
+  async inspect(relPath: string): Promise<FileInspection> {
+    this.inspections.push(relPath);
+    return this.files.get(relPath) ?? { exists: false };
+  }
+}
+
 export interface Harness {
   app: App;
   clock: FakeClock;
@@ -33,7 +58,15 @@ export interface Harness {
 }
 
 export function makeHarness(
-  opts: { policy?: Partial<Policy>; gate?: ReasoningGate; credits?: number; notifier?: Notifier } = {},
+  opts: {
+    policy?: Partial<Policy>;
+    gate?: ReasoningGate;
+    credits?: number;
+    notifier?: Notifier;
+    witness?: Witness;
+    /** Which tenants may define witness checks. Defaults to every tenant. */
+    witnessTenants?: string[] | '*';
+  } = {},
 ): Harness {
   const clock = new FakeClock();
   const notifier = new CaptureNotifier();
@@ -43,8 +76,9 @@ export function makeHarness(
     linkSecret: 'test-link-secret',
     publicUrl: 'http://commander.test',
     dataDir: undefined,
+    witness: { mode: 'off' as const, allow: [] as string[], path: '/usr/bin', tenants: opts.witnessTenants ?? ('*' as const), concurrency: 2 },
   };
-  const app = createApp({ config, clock: clock.now, notifier: opts.notifier ?? notifier, gate: opts.gate });
+  const app = createApp({ config, clock: clock.now, notifier: opts.notifier ?? notifier, gate: opts.gate, witness: opts.witness });
   const { tenant, operatorKey } = app.auth.createTenant('acme', opts.credits ?? 10_000);
   const { key: workerKey } = app.auth.issueKey(tenant.id, 'worker');
   return {

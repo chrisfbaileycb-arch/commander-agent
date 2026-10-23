@@ -122,3 +122,9 @@ export function redirectPatch(p: {
   if (p.operatorPatch) lines.push(`OPERATOR NOTE: ${speak(p.operatorPatch)}`);
   return lines.join('\n');
 }
+
+/** Deterministic redirect patch for a denied action, shared by the MCP tool and the client-side guard. */
+export function actionRedirectPatch(findings: { rule: string; reason: string }[]): string {
+  const lines = findings.map((f, i) => ` ${i + 1}. [${f.rule}] ${f.reason}`);
+  return ['REDIRECT PATCH', 'TRIPPED RULES', ...lines, 'Select a safe alternative that serves the directive. Do not retry this action.'].join('\n');
+}
